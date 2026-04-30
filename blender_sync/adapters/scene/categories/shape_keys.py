@@ -66,6 +66,10 @@ class ShapeKeysCategoryHandler:
                 "relative_key": kb.relative_key.name if kb.relative_key else None,
                 "hash": block_hash,
             }
+            # Interpolation curve between value=0 and value=1 (4.x).
+            interp = getattr(kb, "interpolation", None)
+            if isinstance(interp, str):
+                entry["interpolation"] = interp
             cache_key = (obj.name, kb.name)
             if self._sent_block_hashes.get(cache_key) != block_hash:
                 entry["coords"] = self._extract_coords(kb)
@@ -152,6 +156,12 @@ class ShapeKeysCategoryHandler:
             if vg is not None:
                 try:
                     kb.vertex_group = vg
+                except Exception:
+                    pass
+            interp = bd.get("interpolation")
+            if interp is not None and hasattr(kb, "interpolation"):
+                try:
+                    kb.interpolation = interp
                 except Exception:
                     pass
             rk = bd.get("relative_key")
