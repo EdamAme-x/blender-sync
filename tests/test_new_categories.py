@@ -487,6 +487,55 @@ def test_modifier_serialize_walks_nested_settings():
     assert "rna_type" not in deep
 
 
+def test_particle_settings_serializes_refs_and_deep():
+    """ParticleSettings hides instance object/collection refs and
+    effector_weights one level deep. Without the ref-encoding peers
+    would lose the instance object, and without the deep walk hair
+    drape force-field response would diverge."""
+    from blender_sync.adapters.scene.categories import particle as pmod
+
+    class FakeEW:
+        gravity = 0.5
+        wind = 1.0
+
+    class FakeSettings:
+        name = "ParticleSettings"
+        count = 100
+        child_type = "INTERPOLATED"
+        child_nbr = 4
+        rendered_child_count = 50
+        use_hair_dynamics = True
+        hair_step = 5
+        # Datablock pointers that try_ref can't recognize without bpy
+        # are encoded as empty (clear) — that's fine for the unit test;
+        # in real Blender they'd resolve to '__bsync_ref__:object:Foo'.
+        instance_object = None
+        instance_collection = None
+        force_field_1 = None
+        force_field_2 = None
+        collision_collection = None
+        effector_weights = FakeEW()
+
+    out = pmod._serialize_settings(FakeSettings())
+    assert out["name"] == "ParticleSettings"
+    p = out["props"]
+    assert p["count"] == 100
+    assert p["child_type"] == "INTERPOLATED"
+    assert p["child_nbr"] == 4
+    assert p["rendered_child_count"] == 50
+    assert p["use_hair_dynamics"] is True
+    assert p["hair_step"] == 5
+    # Refs section: each datablock pointer field encoded as "" since the
+    # fake holds None on each.
+    assert out["refs"]["instance_object"] == ""
+    assert out["refs"]["instance_collection"] == ""
+    # Deep walk picked up effector_weights primitives.
+    assert out["deep"]["effector_weights"]["gravity"] == 0.5
+    assert out["deep"]["effector_weights"]["wind"] == 1.0
+    # The deep struct itself must NOT leak into props.
+    assert "effector_weights" not in p
+
+
 def test_modifier_serialize_handles_no_nested_settings():
     """A modifier with no physics struct shouldn't grow a `nested` key."""
     from blender_sync.adapters.scene.categories.modifier import (

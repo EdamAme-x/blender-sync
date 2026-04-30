@@ -4,24 +4,52 @@ Synchronizes Object.particle_systems and the bpy.data.particles settings
 they reference. Baked simulation cache is intentionally out of scope —
 particle physics is stochastic and reseed will replay deterministically
 on the receiver if seed and settings match.
+
+Children (interpolated/simple), hair dynamics (`use_hair_dynamics` +
+hair-dynamics ClothSettings), and effector weights are all carried over
+the wire — without them peers see the wrong child count, wrong drape,
+or different gravity response on hair.
 """
 from __future__ import annotations
 
 from typing import Any
 
+from . import _datablock_ref
 from .base import DirtyContext
 
 _PRIM = (int, float, bool, str)
 
+# Properties handled out-of-band (datablock refs, deep structs) or
+# simply not safe to round-trip through the generic walker.
 _PSETTINGS_BLACKLIST = {
     "rna_type", "bl_rna", "name",
-    "active_instance_object", "active_texture",
+    "active_instance_object", "active_texture", "active_texture_index",
+    # Datablock-typed: handled separately via _DATABLOCK_REF_FIELDS so
+    # the wire encoding survives msgpack and gets re-resolved on apply.
     "force_field_1", "force_field_2",
     "instance_collection", "instance_object",
-    "render_step", "draw_step",
+    "collision_collection", "effector_weights_owner",
+    "texture_slots",
+    # Deep struct: handled separately via _DEEP_NESTED_FIELDS.
     "boids", "fluid", "effector_weights",
-    "render_type",
 }
+
+# ParticleSettings fields whose value is a bpy datablock. Encoded as a
+# `__bsync_ref__:<kind>:<name>` sentinel and re-resolved on the receiver.
+_DATABLOCK_REF_FIELDS = (
+    "instance_object",
+    "instance_collection",
+    "force_field_1",
+    "force_field_2",
+    "collision_collection",
+)
+
+# Sub-structs reached one level under ParticleSettings.
+_DEEP_NESTED_FIELDS = (
+    "effector_weights",
+)
+
+_DEEP_BLACKLIST = {"rna_type", "bl_rna"}
 
 
 def _serialize_value(value: Any) -> Any:
@@ -41,6 +69,21 @@ def _serialize_value(value: Any) -> Any:
     return None
 
 
+def _serialize_leaf_struct(struct) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for attr in dir(struct):
+        if attr.startswith("_") or attr in _DEEP_BLACKLIST:
+            continue
+        try:
+            val = getattr(struct, attr)
+        except Exception:
+            continue
+        if callable(val) or not isinstance(val, _PRIM):
+            continue
+        out[attr] = val
+    return out
+
+
 def _serialize_settings(ps) -> dict[str, Any]:
     out: dict[str, Any] = {"name": ps.name, "props": {}}
     for attr in dir(ps):
@@ -55,6 +98,44 @@ def _serialize_settings(ps) -> dict[str, Any]:
         ser = _serialize_value(val)
         if ser is not None:
             out["props"][attr] = ser
+
+    # Datablock-typed pointer fields — encoded as sentinels.
+    refs: dict[str, str] = {}
+    for fld in _DATABLOCK_REF_FIELDS:
+        if not hasattr(ps, fld):
+            continue
+        try:
+            v = getattr(ps, fld)
+        except Exception:
+            continue
+        if v is None:
+            # Empty string acts as an explicit "clear" so peers can
+            # mirror unsetting a reference.
+            refs[fld] = ""
+            continue
+        ref = _datablock_ref.try_ref(v)
+        if ref is not None:
+            refs[fld] = ref
+    if refs:
+        out["refs"] = refs
+
+    # Deep walk into structs that hide critical state (effector weights:
+    # gravity / wind / vortex / turbulence ...).
+    deep: dict[str, dict[str, Any]] = {}
+    for fld in _DEEP_NESTED_FIELDS:
+        if not hasattr(ps, fld):
+            continue
+        try:
+            sub = getattr(ps, fld)
+        except Exception:
+            continue
+        if sub is None:
+            continue
+        inner = _serialize_leaf_struct(sub)
+        if inner:
+            deep[fld] = inner
+    if deep:
+        out["deep"] = deep
     return out
 
 
@@ -159,10 +240,40 @@ class ParticleCategoryHandler:
                     pass
             settings_data = sd.get("settings") or {}
             if psys.settings is not None and settings_data:
+                pset = psys.settings
                 for k, v in (settings_data.get("props") or {}).items():
-                    if hasattr(psys.settings, k):
+                    if hasattr(pset, k):
                         try:
-                            setattr(psys.settings, k, v)
+                            setattr(pset, k, v)
+                        except Exception:
+                            pass
+                # Datablock-typed pointer fields.
+                for k, token in (settings_data.get("refs") or {}).items():
+                    if not hasattr(pset, k):
+                        continue
+                    if token == "":
+                        try:
+                            setattr(pset, k, None)
+                        except Exception:
+                            pass
+                        continue
+                    resolved = _datablock_ref.resolve_ref(token)
+                    if resolved is None:
+                        continue
+                    try:
+                        setattr(pset, k, resolved)
+                    except Exception:
+                        pass
+                # Deep structs (effector_weights ...).
+                for sub_attr, sub_props in (settings_data.get("deep") or {}).items():
+                    sub = getattr(pset, sub_attr, None)
+                    if sub is None:
+                        continue
+                    for k, v in sub_props.items():
+                        if not hasattr(sub, k):
+                            continue
+                        try:
+                            setattr(sub, k, v)
                         except Exception:
                             pass
 
