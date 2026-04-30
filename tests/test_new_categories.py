@@ -438,12 +438,19 @@ def test_modifier_serialize_walks_nested_settings():
         ModifierCategoryHandler,
     )
 
+    class FakeEffectorWeights:
+        gravity = 1.0
+        wind = 0.5
+        vortex = 0.0
+        rna_type = "SHOULD_NOT_LEAK"
+
     class FakeClothSettings:
         # Subset of ClothSettings — primitives only.
         mass = 0.3
         air_damping = 1.0
         bending_stiffness = 0.5
         tension_stiffness = 15.0
+        effector_weights = FakeEffectorWeights()
         rna_type = "SHOULD_NOT_LEAK"
 
     class FakeClothCollisionSettings:
@@ -471,6 +478,13 @@ def test_modifier_serialize_walks_nested_settings():
     # Internal RNA fields must not leak through.
     assert "rna_type" not in inner["settings"]
     assert "bl_rna" not in inner["collision_settings"]
+    # effector_weights must be picked up via the deep walk; without it
+    # peers won't reproduce gravity / wind / vortex weighting.
+    assert "__deep__" in inner["settings"]
+    deep = inner["settings"]["__deep__"]["effector_weights"]
+    assert deep["gravity"] == 1.0
+    assert deep["wind"] == 0.5
+    assert "rna_type" not in deep
 
 
 def test_modifier_serialize_handles_no_nested_settings():
