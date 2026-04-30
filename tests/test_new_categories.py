@@ -292,6 +292,83 @@ def test_point_cloud_handler_no_bpy_graceful():
     assert h.build_full() == []
 
 
+def test_point_cloud_serialize_uses_attribute_api():
+    """Locks in the Blender 5 attribute API: position via 'vector',
+    radius via 'value'. Caught a real bug pre-merge where the handler
+    used the legacy `pc.points.foreach_get('position', ...)` path that
+    silently failed."""
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    class FakeAttrData:
+        def __init__(self, prop, n):
+            self.prop, self.n = prop, n
+        def foreach_get(self, key, buf):
+            calls.append((self.prop, key))
+            for i in range(min(len(buf), self.n)):
+                buf[i] = 0.0
+
+    class FakeAttr:
+        def __init__(self, prop, n):
+            self.data = FakeAttrData(prop, n)
+
+    class FakeAttrs:
+        def __init__(self, n):
+            self._d = {
+                "position": FakeAttr("position", n * 3),
+                "radius": FakeAttr("radius", n),
+            }
+        def get(self, k):
+            return self._d.get(k)
+
+    class FakePoints:
+        def __init__(self, n): self.n = n
+        def __len__(self): return self.n
+
+    class FakePC:
+        def __init__(self, name, n):
+            self.name = name
+            self.points = FakePoints(n)
+            self.attributes = FakeAttrs(n)
+
+    h = PointCloudCategoryHandler()
+    out = h._serialize(FakePC("Cloud", 4))
+    assert out["name"] == "Cloud"
+    assert out["count"] == 4
+    # The handler must read attribute 'position' with key 'vector' and
+    # attribute 'radius' with key 'value' — not 'position' on points.
+    assert ("position", "vector") in calls
+    assert ("radius", "value") in calls
+    assert len(out["positions"]) == 12
+    assert len(out["radii"]) == 4
+
+
+def test_point_cloud_build_full_truncates_oversize():
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+        _BUILD_FULL_MAX_POINTS,
+    )
+
+    class FakePoints:
+        def __init__(self, n): self.n = n
+        def __len__(self): return self.n
+
+    class FakePC:
+        def __init__(self, name, n):
+            self.name = name
+            self.points = FakePoints(n)
+
+    h = PointCloudCategoryHandler()
+    out = h._serialize(FakePC("Big", _BUILD_FULL_MAX_POINTS + 1),
+                       max_points=_BUILD_FULL_MAX_POINTS)
+    assert out["truncated"] is True
+    assert "positions" not in out
+    assert "radii" not in out
+
+
 def test_dirty_tracker_carries_volume_point_cloud():
     t = DirtyTracker()
     t.mark_volume("Volume")

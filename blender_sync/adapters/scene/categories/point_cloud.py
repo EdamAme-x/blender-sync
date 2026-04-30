@@ -1,22 +1,35 @@
 """Point Cloud data block handler.
 
-Point clouds in Blender expose:
-  - points.position (Vec3) — co-ordinates
-  - points.radius (float) — per-point radius
+Blender 4.x / 5.x exposes point geometry through the unified Attribute
+system, not via per-Point properties. Positions live at
+`pc.attributes['position'].data` (key `'vector'`) and radius lives at
+`pc.attributes['radius'].data` (key `'value'`). The legacy `pc.points`
+collection is read-only — resizing the cloud goes through `pc.resize()`.
 
-We sync positions + radii via foreach_get/_set for efficiency. Custom
-attributes are best-effort; complex geometry-nodes-driven point clouds
-will need a deeper attribute walk in a future revision.
-
-Sizes scale linearly with point count, so per-point hashes / chunked
-diffs are a reasonable future optimization. For the first cut we send
-the full array (msgpack + zstd compresses identical floats well).
+We keep the wire format simple: flat `positions` and `radii` arrays
+plus a `count`. Per-point custom attributes are deferred to a later
+revision; geometry-nodes-driven clouds (where attributes are computed
+each evaluation) need a deeper attribute walk anyway.
 """
 from __future__ import annotations
 
 from typing import Any
 
 from .base import DirtyContext
+
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _np = None
+    _HAS_NUMPY = False
+
+
+# Skip serializing position/radius arrays for clouds bigger than this.
+# Joiners (initial snapshot) would otherwise stall the reliable channel
+# for several seconds per huge cloud — past this size we prefer the
+# explicit force_sync flow.
+_BUILD_FULL_MAX_POINTS = 50_000
 
 
 class PointCloudCategoryHandler:
@@ -41,36 +54,67 @@ class PointCloudCategoryHandler:
             return None
         return coll.get(name)
 
-    def _serialize(self, pc) -> dict[str, Any]:
-        positions: list[float] = []
-        radii: list[float] = []
-        n = 0
+    def _serialize(self, pc, max_points: int | None = None) -> dict[str, Any]:
         try:
             n = len(pc.points)
         except Exception:
             n = 0
-        if n > 0:
+        out: dict[str, Any] = {"name": pc.name, "count": n}
+        if max_points is not None and n > max_points:
+            # Caller asked us to skip arrays for oversize clouds — peers
+            # will need a force_sync to receive the points.
+            out["truncated"] = True
+            return out
+
+        positions = self._read_attribute(pc, "position", "vector", n * 3)
+        radii = self._read_attribute(pc, "radius", "value", n)
+        out["positions"] = positions
+        out["radii"] = radii
+        return out
+
+    def _read_attribute(self, pc, attr_name: str, prop: str, length: int) -> list[float]:
+        if length <= 0:
+            return []
+        attr = self._get_attr(pc, attr_name)
+        if attr is None:
+            return []
+        try:
+            data = attr.data
+        except Exception:
+            return []
+        if _HAS_NUMPY:
             try:
-                positions = [0.0] * (n * 3)
-                pc.points.foreach_get("position", positions)
+                buf = _np.empty(length, dtype=_np.float32)
+                data.foreach_get(prop, buf)
+                return buf.tolist()
             except Exception:
-                positions = []
-                for p in pc.points:
-                    co = getattr(p, "co", None) or getattr(p, "position", None)
-                    if co is None:
-                        continue
-                    positions.extend(float(v) for v in co)
+                pass
+        # Fallback: Python loop. Slow but correct on builds without numpy.
+        out: list[float] = []
+        try:
+            for item in data:
+                v = getattr(item, prop, None)
+                if v is None:
+                    continue
+                if hasattr(v, "__iter__"):
+                    out.extend(float(x) for x in v)
+                else:
+                    out.append(float(v))
+        except Exception:
+            return []
+        return out
+
+    def _get_attr(self, pc, name: str):
+        attrs = getattr(pc, "attributes", None)
+        if attrs is None:
+            return None
+        try:
+            return attrs.get(name)
+        except Exception:
             try:
-                radii = [0.0] * n
-                pc.points.foreach_get("radius", radii)
+                return attrs[name]
             except Exception:
-                radii = []
-        return {
-            "name": pc.name,
-            "count": n,
-            "positions": positions,
-            "radii": radii,
-        }
+                return None
 
     def apply(self, ops: list[dict[str, Any]]) -> None:
         try:
@@ -92,6 +136,11 @@ class PointCloudCategoryHandler:
                     continue
 
             count = int(op.get("count", 0))
+            if op.get("truncated"):
+                # Sender skipped the arrays; only the existence of the
+                # cloud is announced. A force_sync from the sender will
+                # later carry the points.
+                continue
             positions = op.get("positions") or []
             radii = op.get("radii") or []
 
@@ -100,46 +149,62 @@ class PointCloudCategoryHandler:
             except Exception:
                 cur = 0
 
-            # Resize point set. Some Blender builds only expose `add()`
-            # so we grow / shrink via that path. Shrinking is rare; if
-            # the API doesn't support it we just overwrite the prefix.
-            if count > cur and hasattr(pc.points, "add"):
+            if count != cur and hasattr(pc, "resize"):
                 try:
-                    pc.points.add(count - cur)
-                except Exception:
-                    pass
-            elif count < cur and hasattr(pc.points, "remove"):
-                try:
-                    while len(pc.points) > count:
-                        pc.points.remove(pc.points[-1])
+                    pc.resize(size=count)
                 except Exception:
                     pass
 
-            n_now = min(count, len(pc.points))
-            if n_now > 0 and len(positions) >= n_now * 3:
-                try:
-                    pc.points.foreach_set("position", positions[: n_now * 3])
-                except Exception:
-                    for i in range(n_now):
-                        try:
-                            base = i * 3
-                            pc.points[i].co = (
-                                float(positions[base]),
-                                float(positions[base + 1]),
-                                float(positions[base + 2]),
-                            )
-                        except Exception:
-                            pass
-            if n_now > 0 and len(radii) >= n_now:
-                try:
-                    pc.points.foreach_set("radius", radii[:n_now])
-                except Exception:
-                    pass
+            n_now = min(count, len(pc.points) if hasattr(pc, "points") else 0)
+            if n_now > 0:
+                self._write_attribute(pc, "position", "vector", positions, n_now * 3)
+            if n_now > 0:
+                self._write_attribute(pc, "radius", "value", radii, n_now)
 
             try:
                 pc.update_tag()
             except Exception:
                 pass
+
+    def _write_attribute(
+        self, pc, attr_name: str, prop: str, values: list[float], length: int
+    ) -> None:
+        if length <= 0 or len(values) < length:
+            return
+        attr = self._get_attr(pc, attr_name)
+        if attr is None:
+            return
+        try:
+            data = attr.data
+        except Exception:
+            return
+        if _HAS_NUMPY:
+            try:
+                buf = _np.array(values[:length], dtype=_np.float32)
+                data.foreach_set(prop, buf)
+                return
+            except Exception:
+                pass
+        # Per-element fallback. `data[i].vector` and `data[i].value` are
+        # the documented attribute accessors.
+        try:
+            stride = length // max(1, len(data)) if hasattr(data, "__len__") else 1
+            if attr_name == "position":
+                for i, item in enumerate(data):
+                    base = i * 3
+                    if base + 2 < length:
+                        item.vector = (
+                            float(values[base]),
+                            float(values[base + 1]),
+                            float(values[base + 2]),
+                        )
+            else:
+                for i, item in enumerate(data):
+                    if i < length:
+                        item.value = float(values[i])
+            del stride
+        except Exception:
+            pass
 
     def build_full(self) -> list[dict[str, Any]]:
         try:
@@ -149,4 +214,7 @@ class PointCloudCategoryHandler:
         coll = getattr(bpy.data, "pointclouds", None)
         if coll is None:
             return []
-        return [self._serialize(p) for p in coll]
+        # Apply the snapshot truncation here so the initial-snapshot
+        # phase doesn't stall on big clouds. Force sync still sends full
+        # data because it goes through `collect()` (no max_points there).
+        return [self._serialize(p, max_points=_BUILD_FULL_MAX_POINTS) for p in coll]
