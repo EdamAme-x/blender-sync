@@ -126,6 +126,8 @@ class BpyConfigReader:
             texture=bool(st.sync_texture),
             lattice=bool(st.sync_lattice),
             metaball=bool(st.sync_metaball),
+            volume=bool(st.sync_volume),
+            point_cloud=bool(st.sync_point_cloud),
         )
 
     def read_transport_config(self) -> TransportConfig | None:

@@ -35,6 +35,8 @@ _TRACKED = (
     ("curve",      "curves"),
     ("lattice",    "lattices"),
     ("metaball",   "metaballs"),
+    ("volume",     "volumes"),
+    ("point_cloud","pointclouds"),
 )
 
 

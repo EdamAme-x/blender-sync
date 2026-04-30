@@ -28,6 +28,8 @@ _LOOKUP = {
     "world": "worlds",
     "armature": "armatures",
     "action": "actions",
+    "volume": "volumes",
+    "point_cloud": "pointclouds",
 }
 
 
@@ -69,6 +71,12 @@ def try_ref(value: Any) -> str | None:
     mask = getattr(bpy.types, "Mask", None)
     if mask is not None and isinstance(value, mask):
         return f"{REF_PREFIX}mask:{name}"
+    volume = getattr(bpy.types, "Volume", None)
+    if volume is not None and isinstance(value, volume):
+        return f"{REF_PREFIX}volume:{name}"
+    point_cloud = getattr(bpy.types, "PointCloud", None)
+    if point_cloud is not None and isinstance(value, point_cloud):
+        return f"{REF_PREFIX}point_cloud:{name}"
     return None
 
 

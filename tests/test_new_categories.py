@@ -22,6 +22,7 @@ _OFF_KW = dict(
     armature=False, pose=False, shape_keys=False,
     constraints=False, grease_pencil=False, curve=False, particle=False,
     node_group=False, texture=False, lattice=False, metaball=False,
+    volume=False, point_cloud=False,
 )
 
 
@@ -55,6 +56,8 @@ def test_enabled_categories_default_includes_all():
         CategoryKind.TEXTURE,
         CategoryKind.LATTICE,
         CategoryKind.METABALL,
+        CategoryKind.VOLUME,
+        CategoryKind.POINT_CLOUD,
     ):
         assert needed in cats, f"missing {needed}"
 
@@ -127,6 +130,8 @@ class _FakeSnap:
     textures = frozenset()
     lattices = frozenset()
     metaballs = frozenset()
+    volumes = frozenset()
+    point_clouds = frozenset()
     render = False
     compositor = False
     scene_world = False
@@ -257,3 +262,123 @@ def test_metaball_handler_no_bpy_graceful():
 
     h = MetaballCategoryHandler()
     assert h.collect(DirtyContext(S())) == []
+
+
+def test_volume_handler_no_bpy_graceful():
+    from blender_sync.adapters.scene.categories.volume import (
+        VolumeCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        volumes = frozenset({"Volume"})
+
+    h = VolumeCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+    assert h.build_full() == []
+
+
+def test_point_cloud_handler_no_bpy_graceful():
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        point_clouds = frozenset({"PointCloud"})
+
+    h = PointCloudCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+    assert h.build_full() == []
+
+
+def test_point_cloud_serialize_uses_attribute_api():
+    """Locks in the Blender 5 attribute API: position via 'vector',
+    radius via 'value'. Caught a real bug pre-merge where the handler
+    used the legacy `pc.points.foreach_get('position', ...)` path that
+    silently failed."""
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    class FakeAttrData:
+        def __init__(self, prop, n):
+            self.prop, self.n = prop, n
+        def foreach_get(self, key, buf):
+            calls.append((self.prop, key))
+            for i in range(min(len(buf), self.n)):
+                buf[i] = 0.0
+
+    class FakeAttr:
+        def __init__(self, prop, n):
+            self.data = FakeAttrData(prop, n)
+
+    class FakeAttrs:
+        def __init__(self, n):
+            self._d = {
+                "position": FakeAttr("position", n * 3),
+                "radius": FakeAttr("radius", n),
+            }
+        def get(self, k):
+            return self._d.get(k)
+
+    class FakePoints:
+        def __init__(self, n): self.n = n
+        def __len__(self): return self.n
+
+    class FakePC:
+        def __init__(self, name, n):
+            self.name = name
+            self.points = FakePoints(n)
+            self.attributes = FakeAttrs(n)
+
+    h = PointCloudCategoryHandler()
+    out = h._serialize(FakePC("Cloud", 4))
+    assert out["name"] == "Cloud"
+    assert out["count"] == 4
+    # The handler must read attribute 'position' with key 'vector' and
+    # attribute 'radius' with key 'value' — not 'position' on points.
+    assert ("position", "vector") in calls
+    assert ("radius", "value") in calls
+    assert len(out["positions"]) == 12
+    assert len(out["radii"]) == 4
+
+
+def test_point_cloud_build_full_truncates_oversize():
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+        _BUILD_FULL_MAX_POINTS,
+    )
+
+    class FakePoints:
+        def __init__(self, n): self.n = n
+        def __len__(self): return self.n
+
+    class FakePC:
+        def __init__(self, name, n):
+            self.name = name
+            self.points = FakePoints(n)
+
+    h = PointCloudCategoryHandler()
+    out = h._serialize(FakePC("Big", _BUILD_FULL_MAX_POINTS + 1),
+                       max_points=_BUILD_FULL_MAX_POINTS)
+    assert out["truncated"] is True
+    assert "positions" not in out
+    assert "radii" not in out
+
+
+def test_dirty_tracker_carries_volume_point_cloud():
+    t = DirtyTracker()
+    t.mark_volume("Volume")
+    t.mark_point_cloud("PointCloud")
+    snap = t.flush()
+    assert "Volume" in snap.volumes
+    assert "PointCloud" in snap.point_clouds
+    assert t.flush().is_empty()
+
+
+def test_volume_point_cloud_use_reliable_channel():
+    assert CATEGORY_TO_CHANNEL[CategoryKind.VOLUME] is ChannelKind.RELIABLE
+    assert CATEGORY_TO_CHANNEL[CategoryKind.POINT_CLOUD] is ChannelKind.RELIABLE
