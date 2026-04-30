@@ -487,6 +487,76 @@ def test_modifier_serialize_walks_nested_settings():
     assert "rna_type" not in deep
 
 
+def test_particle_settings_serializes_refs_and_deep():
+    """ParticleSettings hides three classes of state we need to sync:
+      1. Object / Collection datablock pointers (instance, collision).
+      2. effector_weights — a sub-struct of force-field weighting.
+      3. force_field_1 / force_field_2 — FieldSettings sub-structs that
+         are auto-allocated (never None) and not datablock pointers.
+
+    Without (3) peers see the wrong per-particle field type and hair
+    physics diverges. Encoded in the same `deep` slot as effector_weights.
+    """
+    from blender_sync.adapters.scene.categories import particle as pmod
+
+    class FakeEW:
+        gravity = 0.5
+        wind = 1.0
+
+    class FakeFieldSettings:
+        type = "VORTEX"
+        strength = 4.0
+        flow = 1.0
+        seed = 5
+
+    class FakeSettings:
+        name = "ParticleSettings"
+        count = 100
+        child_type = "INTERPOLATED"
+        child_nbr = 4
+        rendered_child_count = 50
+        use_hair_dynamics = True
+        hair_step = 5
+        # Real datablock pointers — passing None to exercise the
+        # explicit-clear path. In live Blender these would be Object /
+        # Collection instances and try_ref would emit a sentinel.
+        instance_object = None
+        instance_collection = None
+        collision_collection = None
+        # Force-field sub-structs are auto-allocated and never None.
+        force_field_1 = FakeFieldSettings()
+        force_field_2 = FakeFieldSettings()
+        effector_weights = FakeEW()
+
+    out = pmod._serialize_settings(FakeSettings())
+    assert out["name"] == "ParticleSettings"
+    p = out["props"]
+    assert p["count"] == 100
+    assert p["child_type"] == "INTERPOLATED"
+    assert p["child_nbr"] == 4
+    assert p["rendered_child_count"] == 50
+    assert p["use_hair_dynamics"] is True
+    assert p["hair_step"] == 5
+    # refs: each real datablock pointer encoded as "" since the fake
+    # holds None on each.
+    assert out["refs"]["instance_object"] == ""
+    assert out["refs"]["instance_collection"] == ""
+    assert out["refs"]["collision_collection"] == ""
+    # deep walk: effector_weights primitives.
+    assert out["deep"]["effector_weights"]["gravity"] == 0.5
+    assert out["deep"]["effector_weights"]["wind"] == 1.0
+    # deep walk: per-particle force fields. The earlier-rejected first
+    # cut treated these as datablock refs, which silently dropped them
+    # because FieldSettings is a sub-struct, not an ID.
+    assert out["deep"]["force_field_1"]["type"] == "VORTEX"
+    assert out["deep"]["force_field_1"]["strength"] == 4.0
+    assert out["deep"]["force_field_2"]["type"] == "VORTEX"
+    # The deep structs must NOT also leak into props.
+    assert "effector_weights" not in p
+    assert "force_field_1" not in p
+    assert "force_field_2" not in p
+
+
 def test_modifier_serialize_handles_no_nested_settings():
     """A modifier with no physics struct shouldn't grow a `nested` key."""
     from blender_sync.adapters.scene.categories.modifier import (
