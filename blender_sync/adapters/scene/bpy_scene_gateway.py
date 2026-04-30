@@ -5,7 +5,7 @@ from typing import Any, Iterable
 from ...domain.entities import CategoryKind
 from ...domain.policies.dirty_tracker import DirtyTracker
 from ...domain.ports import ILogger, ISceneGateway
-from .categories import _datablock_ref
+from .categories import _datablock_ref, _nodetree
 from .categories.animation import AnimationCategoryHandler
 from .categories.armature import ArmatureCategoryHandler
 from .categories.base import DirtyContext
@@ -407,6 +407,13 @@ class BpySceneGateway(ISceneGateway):
                         gateway._tracker.mark_metaball(obj_name)
                     elif isinstance(obj, bpy.types.NodeTree):
                         gateway._tracker.mark_node_group(obj_name)
+                        # Transitive: nested NodeGroups must also be sent
+                        # so the receiver can rebuild the dependency chain.
+                        try:
+                            for nested in _nodetree.collect_referenced_node_groups(obj):
+                                gateway._tracker.mark_node_group(nested)
+                        except Exception:
+                            pass
                     elif isinstance(obj, bpy.types.Texture):
                         gateway._tracker.mark_texture(obj_name)
                     elif isinstance(obj, bpy.types.Key):

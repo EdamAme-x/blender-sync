@@ -108,6 +108,27 @@ def serialize_link(link) -> dict[str, Any]:
     }
 
 
+def collect_referenced_node_groups(tree) -> set[str]:
+    """Walk a node tree and return the names of every NodeGroup it
+    references (via Group / GroupNode nodes' `node_tree` property).
+    Used by the gateway to mark transitive NodeGroup dependencies as
+    dirty so deeply nested networks are propagated together."""
+    out: set[str] = set()
+    if tree is None:
+        return out
+    try:
+        for node in tree.nodes:
+            ng = getattr(node, "node_tree", None)
+            if ng is None:
+                continue
+            name = getattr(ng, "name", None)
+            if isinstance(name, str) and name:
+                out.add(name)
+    except Exception:
+        pass
+    return out
+
+
 def serialize_tree_interface(tree) -> list[dict[str, Any]]:
     """Serialize node_tree.interface (Blender 4.0+).
 
