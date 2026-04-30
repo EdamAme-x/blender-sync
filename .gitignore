@@ -1,0 +1,17 @@
+blenderc
+
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
+blender_sync/wheels/*.whl
+
+.DS_Store
+.vscode/
+.idea/
