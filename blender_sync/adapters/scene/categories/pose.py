@@ -69,11 +69,18 @@ class PoseCategoryHandler:
             # Custom shape (mesh widget). Rigs that use control bone
             # widgets need this — without it the receiver renders the
             # default octahedron and the rig looks broken.
-            cs = getattr(pb, "custom_shape", None)
-            if cs is not None:
-                ref = _datablock_ref.try_ref(cs)
-                if ref is not None:
-                    entry["custom_shape"] = ref
+            #
+            # Encode `None` explicitly as the empty string so peers can
+            # apply the clear; otherwise a user who unsets a widget would
+            # leave peers stuck on the previous shape.
+            if hasattr(pb, "custom_shape"):
+                cs = pb.custom_shape
+                if cs is None:
+                    entry["custom_shape"] = ""
+                else:
+                    ref = _datablock_ref.try_ref(cs)
+                    if ref is not None:
+                        entry["custom_shape"] = ref
             for k in (
                 "custom_shape_scale_xyz", "custom_shape_translation",
                 "custom_shape_rotation_euler",
@@ -94,9 +101,17 @@ class PoseCategoryHandler:
                             entry[k] = v
                     except Exception:
                         pass
-            cstrans = getattr(pb, "custom_shape_transform", None)
-            if cstrans is not None and getattr(cstrans, "name", None):
-                entry["custom_shape_transform"] = cstrans.name
+            # custom_shape_transform: an override pose-bone whose space
+            # the widget is drawn in. Same null-as-clear convention as
+            # custom_shape so peers can unset it.
+            if hasattr(pb, "custom_shape_transform"):
+                cstrans = pb.custom_shape_transform
+                if cstrans is None:
+                    entry["custom_shape_transform"] = ""
+                else:
+                    n = getattr(cstrans, "name", None)
+                    if n:
+                        entry["custom_shape_transform"] = n
 
             constraints = []
             for c in pb.constraints:

@@ -423,8 +423,11 @@ def test_pose_serializes_custom_shape_fields_when_present():
     assert bone["custom_shape_translation"] == [0.5, 0.0, 0.0]
     assert bone["use_custom_shape_bone_size"] is False
     assert bone["custom_shape_wire_width"] == 1.5
-    # Empty custom_shape (None) should not be encoded as a sentinel ref.
-    assert "custom_shape" not in bone
+    # Cleared custom_shape (None) must be encoded as the empty-string
+    # sentinel so peers can clear theirs in turn — otherwise unsetting
+    # a widget never propagates and peers stay stuck on the old shape.
+    assert bone["custom_shape"] == ""
+    assert bone["custom_shape_transform"] == ""
 
 
 def test_shape_keys_serialize_includes_interpolation():
