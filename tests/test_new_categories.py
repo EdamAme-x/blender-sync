@@ -22,6 +22,7 @@ _OFF_KW = dict(
     armature=False, pose=False, shape_keys=False,
     constraints=False, grease_pencil=False, curve=False, particle=False,
     node_group=False, texture=False, lattice=False, metaball=False,
+    volume=False, point_cloud=False,
 )
 
 
@@ -55,6 +56,8 @@ def test_enabled_categories_default_includes_all():
         CategoryKind.TEXTURE,
         CategoryKind.LATTICE,
         CategoryKind.METABALL,
+        CategoryKind.VOLUME,
+        CategoryKind.POINT_CLOUD,
     ):
         assert needed in cats, f"missing {needed}"
 
@@ -127,6 +130,8 @@ class _FakeSnap:
     textures = frozenset()
     lattices = frozenset()
     metaballs = frozenset()
+    volumes = frozenset()
+    point_clouds = frozenset()
     render = False
     compositor = False
     scene_world = False
@@ -257,3 +262,46 @@ def test_metaball_handler_no_bpy_graceful():
 
     h = MetaballCategoryHandler()
     assert h.collect(DirtyContext(S())) == []
+
+
+def test_volume_handler_no_bpy_graceful():
+    from blender_sync.adapters.scene.categories.volume import (
+        VolumeCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        volumes = frozenset({"Volume"})
+
+    h = VolumeCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+    assert h.build_full() == []
+
+
+def test_point_cloud_handler_no_bpy_graceful():
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        point_clouds = frozenset({"PointCloud"})
+
+    h = PointCloudCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+    assert h.build_full() == []
+
+
+def test_dirty_tracker_carries_volume_point_cloud():
+    t = DirtyTracker()
+    t.mark_volume("Volume")
+    t.mark_point_cloud("PointCloud")
+    snap = t.flush()
+    assert "Volume" in snap.volumes
+    assert "PointCloud" in snap.point_clouds
+    assert t.flush().is_empty()
+
+
+def test_volume_point_cloud_use_reliable_channel():
+    assert CATEGORY_TO_CHANNEL[CategoryKind.VOLUME] is ChannelKind.RELIABLE
+    assert CATEGORY_TO_CHANNEL[CategoryKind.POINT_CLOUD] is ChannelKind.RELIABLE

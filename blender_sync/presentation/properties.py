@@ -36,6 +36,8 @@ class SyncSessionState(PropertyGroup):
     sync_texture: BoolProperty(name="Texture", default=True)
     sync_lattice: BoolProperty(name="Lattice", default=True)
     sync_metaball: BoolProperty(name="Metaball", default=True)
+    sync_volume: BoolProperty(name="Volume", default=True)
+    sync_point_cloud: BoolProperty(name="Point Cloud", default=True)
 
     conflict_policy: bpy.props.EnumProperty(
         name="Conflict Policy",

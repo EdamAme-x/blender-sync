@@ -40,6 +40,8 @@ _TRACKED = (
     ("grease_pencil", "grease_pencils_v3"),
     ("grease_pencil", "grease_pencils"),
     ("particle_settings", "particles"),
+    ("volume",        "volumes"),
+    ("point_cloud",   "pointclouds"),
 )
 
 

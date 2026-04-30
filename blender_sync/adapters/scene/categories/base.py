@@ -29,6 +29,7 @@ class DirtyContext:
         "armatures", "poses", "shape_keys",
         "grease_pencils", "curves", "particles",
         "node_groups", "textures", "lattices", "metaballs",
+        "volumes", "point_clouds",
     )
 
     def __init__(self, snap) -> None:
@@ -56,6 +57,8 @@ class DirtyContext:
         self.textures = set(getattr(snap, "textures", frozenset()))
         self.lattices = set(getattr(snap, "lattices", frozenset()))
         self.metaballs = set(getattr(snap, "metaballs", frozenset()))
+        self.volumes = set(getattr(snap, "volumes", frozenset()))
+        self.point_clouds = set(getattr(snap, "point_clouds", frozenset()))
 
 
 class ICategoryHandler(Protocol):

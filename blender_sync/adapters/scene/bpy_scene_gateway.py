@@ -21,7 +21,9 @@ from .categories.lattice import LatticeCategoryHandler
 from .categories.metaball import MetaballCategoryHandler
 from .categories.node_group import NodeGroupCategoryHandler
 from .categories.particle import ParticleCategoryHandler
+from .categories.point_cloud import PointCloudCategoryHandler
 from .categories.texture import TextureCategoryHandler
+from .categories.volume import VolumeCategoryHandler
 from .categories.light import LightCategoryHandler
 from .categories.material import MaterialCategoryHandler
 from .categories.material_slots import MaterialSlotsCategoryHandler
@@ -103,6 +105,8 @@ class BpySceneGateway(ISceneGateway):
             CategoryKind.GREASE_PENCIL: GreasePencilCategoryHandler(),
             CategoryKind.LATTICE: LatticeCategoryHandler(),
             CategoryKind.METABALL: MetaballCategoryHandler(),
+            CategoryKind.VOLUME: VolumeCategoryHandler(),
+            CategoryKind.POINT_CLOUD: PointCloudCategoryHandler(),
             CategoryKind.PARTICLE: ParticleCategoryHandler(),
             # Tier 3: scene-level singletons
             CategoryKind.RENDER: RenderCategoryHandler(),
@@ -252,6 +256,10 @@ class BpySceneGateway(ISceneGateway):
             return bool(snap.lattices)
         if category is CategoryKind.METABALL:
             return bool(snap.metaballs)
+        if category is CategoryKind.VOLUME:
+            return bool(snap.volumes)
+        if category is CategoryKind.POINT_CLOUD:
+            return bool(snap.point_clouds)
         return False
 
     def apply_ops(self, category: CategoryKind, ops: list[dict[str, Any]]) -> None:
@@ -366,6 +374,16 @@ class BpySceneGateway(ISceneGateway):
                                     gateway._tracker.mark_lattice(data_name)
                                 elif isinstance(data, bpy.types.MetaBall):
                                     gateway._tracker.mark_metaball(data_name)
+                                elif (
+                                    getattr(bpy.types, "Volume", None) is not None
+                                    and isinstance(data, bpy.types.Volume)
+                                ):
+                                    gateway._tracker.mark_volume(data_name)
+                                elif (
+                                    getattr(bpy.types, "PointCloud", None) is not None
+                                    and isinstance(data, bpy.types.PointCloud)
+                                ):
+                                    gateway._tracker.mark_point_cloud(data_name)
                                 else:
                                     gp_v3 = getattr(bpy.types, "GreasePencilv3", None)
                                     gp_classic = getattr(bpy.types, "GreasePencil", None)
@@ -405,6 +423,16 @@ class BpySceneGateway(ISceneGateway):
                         gateway._tracker.mark_lattice(obj_name)
                     elif isinstance(obj, bpy.types.MetaBall):
                         gateway._tracker.mark_metaball(obj_name)
+                    elif (
+                        getattr(bpy.types, "Volume", None) is not None
+                        and isinstance(obj, bpy.types.Volume)
+                    ):
+                        gateway._tracker.mark_volume(obj_name)
+                    elif (
+                        getattr(bpy.types, "PointCloud", None) is not None
+                        and isinstance(obj, bpy.types.PointCloud)
+                    ):
+                        gateway._tracker.mark_point_cloud(obj_name)
                     elif isinstance(obj, bpy.types.NodeTree):
                         gateway._tracker.mark_node_group(obj_name)
                         # Transitive: nested NodeGroups must also be sent

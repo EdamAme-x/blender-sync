@@ -98,6 +98,8 @@ _JA: dict[tuple[str, str], str] = {
     (CTX_DEFAULT, "Texture"): "テクスチャ",
     (CTX_DEFAULT, "Lattice"): "ラティス",
     (CTX_DEFAULT, "Metaball"): "メタボール",
+    (CTX_DEFAULT, "Volume"): "ボリューム",
+    (CTX_DEFAULT, "Point Cloud"): "ポイントクラウド",
     (CTX_DEFAULT, "Latency (ms)"): "レイテンシ (ms)",
     (CTX_DEFAULT, "Bandwidth (KB/s)"): "帯域 (KB/s)",
     (CTX_DEFAULT, "Peer Count"): "ピア数",
