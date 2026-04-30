@@ -382,3 +382,95 @@ def test_dirty_tracker_carries_volume_point_cloud():
 def test_volume_point_cloud_use_reliable_channel():
     assert CATEGORY_TO_CHANNEL[CategoryKind.VOLUME] is ChannelKind.RELIABLE
     assert CATEGORY_TO_CHANNEL[CategoryKind.POINT_CLOUD] is ChannelKind.RELIABLE
+
+
+def test_pose_serializes_custom_shape_fields_when_present():
+    """Verifies the custom-shape fields serialize through the duck-typed
+    fallback path. Catches typos in the wire field names."""
+    from blender_sync.adapters.scene.categories.pose import PoseCategoryHandler
+
+    class FakeColor:
+        palette = "DEFAULT"
+
+    class FakePB:
+        name = "Bone"
+        location = (0, 0, 0)
+        scale = (1, 1, 1)
+        rotation_mode = "QUATERNION"
+        rotation_quaternion = (1, 0, 0, 0)
+        color = FakeColor()
+        custom_shape = None
+        custom_shape_scale_xyz = (2.0, 3.0, 4.0)
+        custom_shape_translation = (0.5, 0.0, 0.0)
+        custom_shape_rotation_euler = (0.0, 0.0, 0.0)
+        use_custom_shape_bone_size = False
+        custom_shape_wire_width = 1.5
+        custom_shape_transform = None
+        constraints = ()
+
+    class FakePose:
+        bones = (FakePB(),)
+
+    class FakeArm:
+        name = "Armature"
+        type = "ARMATURE"
+        pose = FakePose()
+
+    h = PoseCategoryHandler()
+    out = h._serialize(FakeArm())
+    bone = out["bones"][0]
+    assert bone["custom_shape_scale_xyz"] == [2.0, 3.0, 4.0]
+    assert bone["custom_shape_translation"] == [0.5, 0.0, 0.0]
+    assert bone["use_custom_shape_bone_size"] is False
+    assert bone["custom_shape_wire_width"] == 1.5
+    # Cleared custom_shape (None) must be encoded as the empty-string
+    # sentinel so peers can clear theirs in turn — otherwise unsetting
+    # a widget never propagates and peers stay stuck on the old shape.
+    assert bone["custom_shape"] == ""
+    assert bone["custom_shape_transform"] == ""
+
+
+def test_shape_keys_serialize_includes_interpolation():
+    """Ensures shape-key handler picks up `interpolation` (Blender 4 ease
+    curve enum) so peers reproduce non-linear blends."""
+    from blender_sync.adapters.scene.categories.shape_keys import (
+        ShapeKeysCategoryHandler,
+    )
+
+    class FakeKBDataList(list):
+        def foreach_get(self, key, buf):
+            for i in range(len(buf)):
+                buf[i] = 0.0
+
+    class FakeKBData:
+        co = (0.0, 0.0, 0.0)
+
+    class FakeKB:
+        name = "Smile"
+        value = 0.5
+        mute = False
+        slider_min = 0.0
+        slider_max = 1.0
+        vertex_group = ""
+        relative_key = None
+        interpolation = "KEY_BSPLINE"
+
+        def __init__(self):
+            self.data = FakeKBDataList([FakeKBData()])
+
+    class FakeKeys:
+        use_relative = True
+        key_blocks = (FakeKB(),)
+
+    class FakeData:
+        shape_keys = FakeKeys()
+
+    class FakeObj:
+        name = "Cube"
+        data = FakeData()
+
+    h = ShapeKeysCategoryHandler()
+    out = h._serialize(FakeObj())
+    blocks = out["blocks"]
+    assert blocks[0]["interpolation"] == "KEY_BSPLINE"
+    assert blocks[0]["vertex_group"] == ""

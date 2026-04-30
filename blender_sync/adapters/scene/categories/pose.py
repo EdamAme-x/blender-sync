@@ -4,6 +4,8 @@ For each Object with type=='ARMATURE', we serialize per-bone:
   - location / rotation / scale (pose-space transforms applied to the rest)
   - rotation_mode
   - bone constraints (basic: IK target/chain, COPY_ROTATION/LOCATION)
+  - custom display shape (object reference + scale + override transform
+    + wireframe width) — for rigs that use mesh widgets
 
 Pose updates fire frequently during animation playback or live rigging,
 so we route them through the FAST channel like Object transforms.
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import _datablock_ref
 from .base import DirtyContext
 
 
@@ -62,6 +65,53 @@ class PoseCategoryHandler:
                     entry["color_palette"] = bcolor.palette
                 except Exception:
                     pass
+
+            # Custom shape (mesh widget). Rigs that use control bone
+            # widgets need this — without it the receiver renders the
+            # default octahedron and the rig looks broken.
+            #
+            # Encode `None` explicitly as the empty string so peers can
+            # apply the clear; otherwise a user who unsets a widget would
+            # leave peers stuck on the previous shape.
+            if hasattr(pb, "custom_shape"):
+                cs = pb.custom_shape
+                if cs is None:
+                    entry["custom_shape"] = ""
+                else:
+                    ref = _datablock_ref.try_ref(cs)
+                    if ref is not None:
+                        entry["custom_shape"] = ref
+            for k in (
+                "custom_shape_scale_xyz", "custom_shape_translation",
+                "custom_shape_rotation_euler",
+            ):
+                v = getattr(pb, k, None)
+                if v is not None:
+                    try:
+                        entry[k] = list(v)
+                    except Exception:
+                        pass
+            for k in (
+                "use_custom_shape_bone_size", "custom_shape_wire_width",
+            ):
+                if hasattr(pb, k):
+                    try:
+                        v = getattr(pb, k)
+                        if isinstance(v, (int, float, bool)):
+                            entry[k] = v
+                    except Exception:
+                        pass
+            # custom_shape_transform: an override pose-bone whose space
+            # the widget is drawn in. Same null-as-clear convention as
+            # custom_shape so peers can unset it.
+            if hasattr(pb, "custom_shape_transform"):
+                cstrans = pb.custom_shape_transform
+                if cstrans is None:
+                    entry["custom_shape_transform"] = ""
+                else:
+                    n = getattr(cstrans, "name", None)
+                    if n:
+                        entry["custom_shape_transform"] = n
 
             constraints = []
             for c in pb.constraints:
@@ -148,7 +198,67 @@ class PoseCategoryHandler:
                         except Exception:
                             pass
 
+                self._apply_custom_shape(bpy, pb, bd, obj)
                 self._apply_constraints(bpy, pb, bd.get("constraints") or [])
+
+    def _apply_custom_shape(self, bpy, pb, bd: dict, owner_obj) -> None:
+        cs_token = bd.get("custom_shape")
+        if cs_token is not None:
+            if cs_token == "":
+                # Explicit clear.
+                try:
+                    pb.custom_shape = None
+                except Exception:
+                    pass
+            else:
+                target = _datablock_ref.resolve_ref(cs_token)
+                if target is not None:
+                    try:
+                        pb.custom_shape = target
+                    except Exception:
+                        pass
+                # If unresolved, the bone keeps its previous shape; the
+                # next snapshot tick will retry once the referent arrives.
+        for k in (
+            "custom_shape_scale_xyz", "custom_shape_translation",
+            "custom_shape_rotation_euler",
+        ):
+            v = bd.get(k)
+            if v is None or not hasattr(pb, k):
+                continue
+            try:
+                if len(v) == 3:
+                    setattr(pb, k, (float(v[0]), float(v[1]), float(v[2])))
+            except Exception:
+                pass
+        for k in ("use_custom_shape_bone_size", "custom_shape_wire_width"):
+            if k in bd and hasattr(pb, k):
+                try:
+                    cur = getattr(pb, k)
+                    if isinstance(cur, bool):
+                        setattr(pb, k, bool(bd[k]))
+                    else:
+                        setattr(pb, k, type(cur)(bd[k]))
+                except Exception:
+                    pass
+        cstrans_name = bd.get("custom_shape_transform")
+        if cstrans_name is not None and hasattr(pb, "custom_shape_transform"):
+            if not cstrans_name:
+                try:
+                    pb.custom_shape_transform = None
+                except Exception:
+                    pass
+            else:
+                # Must be a pose-bone of the same armature.
+                target_pb = (
+                    owner_obj.pose.bones.get(cstrans_name)
+                    if owner_obj.pose else None
+                )
+                if target_pb is not None:
+                    try:
+                        pb.custom_shape_transform = target_pb
+                    except Exception:
+                        pass
 
     def _apply_constraints(self, bpy, pb, constraints: list) -> None:
         # Reset and rebuild — bone constraints are typically few per bone.
