@@ -412,8 +412,10 @@ class BpySceneGateway(ISceneGateway):
                         try:
                             for nested in _nodetree.collect_referenced_node_groups(obj):
                                 gateway._tracker.mark_node_group(nested)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            gateway._logger.debug(
+                                "transitive node_group walk failed: %s", exc,
+                            )
                     elif isinstance(obj, bpy.types.Texture):
                         gateway._tracker.mark_texture(obj_name)
                     elif isinstance(obj, bpy.types.Key):

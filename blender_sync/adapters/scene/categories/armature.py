@@ -152,11 +152,12 @@ class ArmatureCategoryHandler:
             return
 
         # Skip silently in headless / background contexts where bpy.ops
-        # cannot be invoked (no view layer / no active scene).
+        # cannot be invoked. Background mode is the cheaper check, so it
+        # comes first.
+        if getattr(bpy.app, "background", False):
+            return
         view_layer = getattr(bpy.context, "view_layer", None)
         if view_layer is None or not hasattr(view_layer, "objects"):
-            return
-        if getattr(bpy.app, "background", False):
             return
 
         prev_active = view_layer.objects.active
@@ -219,7 +220,7 @@ class ArmatureCategoryHandler:
             except Exception:
                 pass
             try:
-                bpy.context.view_layer.objects.active = prev_active
+                view_layer.objects.active = prev_active
             except Exception:
                 pass
 
