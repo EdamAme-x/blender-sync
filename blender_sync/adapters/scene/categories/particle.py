@@ -26,12 +26,15 @@ _PSETTINGS_BLACKLIST = {
     "active_instance_object", "active_texture", "active_texture_index",
     # Datablock-typed: handled separately via _DATABLOCK_REF_FIELDS so
     # the wire encoding survives msgpack and gets re-resolved on apply.
-    "force_field_1", "force_field_2",
     "instance_collection", "instance_object",
-    "collision_collection", "effector_weights_owner",
+    "collision_collection",
     "texture_slots",
     # Deep struct: handled separately via _DEEP_NESTED_FIELDS.
+    # `force_field_1` / `force_field_2` are FieldSettings sub-structs
+    # (always non-None, not datablock pointers) — they belong here, not
+    # in the ref list.
     "boids", "fluid", "effector_weights",
+    "force_field_1", "force_field_2",
 }
 
 # ParticleSettings fields whose value is a bpy datablock. Encoded as a
@@ -39,14 +42,18 @@ _PSETTINGS_BLACKLIST = {
 _DATABLOCK_REF_FIELDS = (
     "instance_object",
     "instance_collection",
-    "force_field_1",
-    "force_field_2",
     "collision_collection",
 )
 
-# Sub-structs reached one level under ParticleSettings.
+# Sub-structs reached one level under ParticleSettings. `force_field_1`
+# / `force_field_2` are auto-allocated FieldSettings — never None — and
+# carry per-particle force settings (type, strength, falloff, ...).
+# Without descending into them, peers see the wrong field type on hair
+# / particle physics.
 _DEEP_NESTED_FIELDS = (
     "effector_weights",
+    "force_field_1",
+    "force_field_2",
 )
 
 _DEEP_BLACKLIST = {"rna_type", "bl_rna"}
