@@ -108,6 +108,41 @@ def serialize_link(link) -> dict[str, Any]:
     }
 
 
+def collect_referenced_node_groups(tree) -> set[str]:
+    """Walk a node tree recursively and return the names of every
+    NodeGroup it references — directly *and* through nested groups.
+
+    Used by the gateway to mark transitive NodeGroup dependencies as
+    dirty so deeply nested networks are propagated together. A
+    `visited` set guards against reference cycles which Blender does
+    allow in some obscure setups (Group A → Group B → Group A).
+    """
+    out: set[str] = set()
+    visited: set[int] = set()
+    _walk_node_groups(tree, out, visited)
+    return out
+
+
+def _walk_node_groups(tree, out: set[str], visited: set[int]) -> None:
+    if tree is None:
+        return
+    tree_id = id(tree)
+    if tree_id in visited:
+        return
+    visited.add(tree_id)
+    try:
+        for node in tree.nodes:
+            ng = getattr(node, "node_tree", None)
+            if ng is None:
+                continue
+            name = getattr(ng, "name", None)
+            if isinstance(name, str) and name:
+                out.add(name)
+            _walk_node_groups(ng, out, visited)
+    except Exception:
+        pass
+
+
 def serialize_tree_interface(tree) -> list[dict[str, Any]]:
     """Serialize node_tree.interface (Blender 4.0+).
 

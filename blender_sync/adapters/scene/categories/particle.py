@@ -106,24 +106,11 @@ class ParticleCategoryHandler:
         target_n = len(systems)
         cur_n = len(obj.particle_systems)
 
-        # Add new particle systems via the ParticleSystem modifier API,
-        # which doesn't require bpy.ops or active-object switches.
-        while cur_n < target_n:
-            try:
-                mod = obj.modifiers.new(
-                    name=f"ParticleSystem.{cur_n + 1}",
-                    type="PARTICLE_SYSTEM",
-                )
-                if mod is None:
-                    break
-            except Exception:
-                break
-            cur_n += 1
-
-        # Remove extras by deleting their modifiers (one per system).
+        # Removing happens last-in-first-out (reversed) so existing
+        # system indices remain stable for the prop-update loop below.
         while cur_n > target_n:
             removed = False
-            for m in list(obj.modifiers):
+            for m in reversed(list(obj.modifiers)):
                 if getattr(m, "type", "") == "PARTICLE_SYSTEM":
                     try:
                         obj.modifiers.remove(m)
@@ -134,6 +121,22 @@ class ParticleCategoryHandler:
                         pass
             if not removed:
                 break
+
+        # When adding, use the wire-supplied name where possible. Blender
+        # auto-suffixes on collision; we accept that since system index
+        # is what matters for prop-application.
+        for i in range(cur_n, target_n):
+            requested = systems[i].get("name") or f"ParticleSystem.{i + 1}"
+            try:
+                mod = obj.modifiers.new(
+                    name=requested,
+                    type="PARTICLE_SYSTEM",
+                )
+                if mod is None:
+                    break
+            except Exception:
+                break
+            cur_n += 1
 
         n = min(cur_n, target_n)
         for i in range(n):

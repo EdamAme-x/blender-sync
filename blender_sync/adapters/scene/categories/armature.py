@@ -151,10 +151,19 @@ class ArmatureCategoryHandler:
         if owner is None:
             return
 
-        prev_active = bpy.context.view_layer.objects.active
-        prev_mode = owner.mode
+        # Skip silently in headless / background contexts where bpy.ops
+        # cannot be invoked. Background mode is the cheaper check, so it
+        # comes first.
+        if getattr(bpy.app, "background", False):
+            return
+        view_layer = getattr(bpy.context, "view_layer", None)
+        if view_layer is None or not hasattr(view_layer, "objects"):
+            return
+
+        prev_active = view_layer.objects.active
+        prev_mode = owner.mode if hasattr(owner, "mode") else "OBJECT"
         try:
-            bpy.context.view_layer.objects.active = owner
+            view_layer.objects.active = owner
             try:
                 bpy.ops.object.mode_set(mode="EDIT")
             except Exception:
@@ -211,7 +220,7 @@ class ArmatureCategoryHandler:
             except Exception:
                 pass
             try:
-                bpy.context.view_layer.objects.active = prev_active
+                view_layer.objects.active = prev_active
             except Exception:
                 pass
 
