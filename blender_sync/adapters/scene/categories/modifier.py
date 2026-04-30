@@ -18,6 +18,40 @@ _MOD_PROP_BLACKLIST = {
     "rna_type", "bl_rna", "name", "type", "is_active",
 }
 
+# Physics modifiers store almost all of their interesting state in
+# nested settings structs, not directly on the modifier. The walk in
+# `_serialize_modifier` flattens these into a sibling dict so peers can
+# round-trip without us having to enumerate every individual property.
+# Particles are handled separately by ParticleCategoryHandler.
+_NESTED_SETTINGS_ATTRS = (
+    "settings",            # Cloth, SoftBody
+    "collision_settings",  # Cloth
+    "domain_settings",     # Fluid (when fluid_type == 'DOMAIN')
+    "flow_settings",       # Fluid (when fluid_type == 'FLOW')
+    "effector_settings",   # Fluid (when fluid_type == 'EFFECTOR')
+    "point_cache",         # Cloth/SoftBody — playback range only, not bake data
+)
+
+# Sub-structs reached one level under _NESTED_SETTINGS_ATTRS. Most
+# physics settings hide effector weighting (gravity, wind, vortex...)
+# here; without descending peers won't reproduce force-field response
+# and sims will still drift even after the parent struct sync.
+_DEEP_NESTED_ATTRS = (
+    "effector_weights",
+)
+
+_NESTED_PROP_BLACKLIST = {
+    "rna_type", "bl_rna",
+    # Skip baked / cached data — far too large for the wire and not
+    # reproducible across machines anyway. Peers re-bake locally.
+    "data", "data_types", "info",
+    # PointCache read-only flags. Sending them just produces silent
+    # setattr failures on the receiver.
+    "is_baked", "is_baking", "is_outdated", "is_frame_skip",
+    # Collections of cache items, not directly settable.
+    "point_caches",
+}
+
 
 def _serialize_value(value: Any) -> Any:
     if isinstance(value, _PRIM):
@@ -84,6 +118,7 @@ class ModifierCategoryHandler:
             "type": mod.type,
         }
         props: dict[str, Any] = {}
+        nested: dict[str, dict[str, Any]] = {}
         for attr in dir(mod):
             if attr.startswith("_") or attr in _MOD_PROP_BLACKLIST:
                 continue
@@ -93,12 +128,72 @@ class ModifierCategoryHandler:
                 continue
             if callable(val):
                 continue
+            if attr in _NESTED_SETTINGS_ATTRS and val is not None:
+                # Walk the nested struct (Cloth settings etc.). The
+                # struct itself can't be serialized; its primitive props
+                # can.
+                inner = self._serialize_struct(val)
+                if inner:
+                    nested[attr] = inner
+                continue
             serialized = (
                 val if isinstance(val, _PRIM) else _serialize_value(val)
             )
             if serialized is not None:
                 props[attr] = serialized
         out["props"] = props
+        if nested:
+            out["nested"] = nested
+        return out
+
+    def _serialize_struct(self, struct) -> dict[str, Any]:
+        """Serialize a single Blender RNA sub-struct.
+
+        Used for ClothSettings, SoftBodySettings, FluidDomainSettings,
+        etc. — anywhere a physics modifier hides its real state.
+        Recurses one extra level into specifically-named sub-structs
+        (currently `effector_weights`) so force-field response stays in
+        sync between peers.
+        """
+        out: dict[str, Any] = {}
+        deep: dict[str, dict[str, Any]] = {}
+        for attr in dir(struct):
+            if attr.startswith("_") or attr in _NESTED_PROP_BLACKLIST:
+                continue
+            try:
+                val = getattr(struct, attr)
+            except Exception:
+                continue
+            if callable(val):
+                continue
+            if attr in _DEEP_NESTED_ATTRS and val is not None:
+                inner = self._serialize_leaf_struct(val)
+                if inner:
+                    deep[attr] = inner
+                continue
+            serialized = (
+                val if isinstance(val, _PRIM) else _serialize_value(val)
+            )
+            if serialized is not None:
+                out[attr] = serialized
+        if deep:
+            out["__deep__"] = deep
+        return out
+
+    def _serialize_leaf_struct(self, struct) -> dict[str, Any]:
+        """Final-level walk; only primitives. Used for sub-sub-structs
+        like EffectorWeights where we don't want any further recursion."""
+        out: dict[str, Any] = {}
+        for attr in dir(struct):
+            if attr.startswith("_") or attr in _NESTED_PROP_BLACKLIST:
+                continue
+            try:
+                val = getattr(struct, attr)
+            except Exception:
+                continue
+            if callable(val) or not isinstance(val, _PRIM):
+                continue
+            out[attr] = val
         return out
 
     def apply(self, ops: list[dict[str, Any]]) -> None:
@@ -148,6 +243,47 @@ class ModifierCategoryHandler:
                     setattr(new_mod, k, v)
                 except Exception:
                     continue
+            # Nested physics structs (Cloth.settings, Fluid.domain_settings, ...).
+            for struct_attr, inner in (entry.get("nested") or {}).items():
+                struct = getattr(new_mod, struct_attr, None)
+                if struct is None:
+                    continue
+                self._apply_struct(struct, inner)
+
+    def _apply_struct(self, struct, inner: dict) -> None:
+        deep = inner.get("__deep__")
+        for k, v in inner.items():
+            if k == "__deep__":
+                continue
+            if not hasattr(struct, k):
+                continue
+            if _datablock_ref.is_ref(v):
+                resolved = _datablock_ref.resolve_ref(v)
+                if resolved is None:
+                    if self._retry_queue is not None:
+                        self._retry_queue.add(struct, k, v)
+                    continue
+                try:
+                    setattr(struct, k, resolved)
+                except Exception:
+                    continue
+                continue
+            try:
+                setattr(struct, k, v)
+            except Exception:
+                continue
+        if deep:
+            for sub_attr, sub_props in deep.items():
+                sub = getattr(struct, sub_attr, None)
+                if sub is None:
+                    continue
+                for k, v in sub_props.items():
+                    if not hasattr(sub, k):
+                        continue
+                    try:
+                        setattr(sub, k, v)
+                    except Exception:
+                        continue
 
     def build_full(self) -> list[dict[str, Any]]:
         try:

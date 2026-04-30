@@ -430,6 +430,81 @@ def test_pose_serializes_custom_shape_fields_when_present():
     assert bone["custom_shape_transform"] == ""
 
 
+def test_modifier_serialize_walks_nested_settings():
+    """Cloth / SoftBody / Fluid hide their interesting state in nested
+    settings sub-structs. The walker must flatten those into a `nested`
+    dict, otherwise peers receive an empty modifier and sim diverges."""
+    from blender_sync.adapters.scene.categories.modifier import (
+        ModifierCategoryHandler,
+    )
+
+    class FakeEffectorWeights:
+        gravity = 1.0
+        wind = 0.5
+        vortex = 0.0
+        rna_type = "SHOULD_NOT_LEAK"
+
+    class FakeClothSettings:
+        # Subset of ClothSettings — primitives only.
+        mass = 0.3
+        air_damping = 1.0
+        bending_stiffness = 0.5
+        tension_stiffness = 15.0
+        effector_weights = FakeEffectorWeights()
+        rna_type = "SHOULD_NOT_LEAK"
+
+    class FakeClothCollisionSettings:
+        use_collision = True
+        distance_min = 0.015
+        bl_rna = "SHOULD_NOT_LEAK"
+
+    class FakeMod:
+        name = "Cloth"
+        type = "CLOTH"
+        show_viewport = True
+        settings = FakeClothSettings()
+        collision_settings = FakeClothCollisionSettings()
+
+    h = ModifierCategoryHandler()
+    out = h._serialize_modifier(FakeMod())
+    assert out["name"] == "Cloth"
+    assert out["type"] == "CLOTH"
+    assert "nested" in out
+    inner = out["nested"]
+    assert inner["settings"]["mass"] == 0.3
+    assert inner["settings"]["tension_stiffness"] == 15.0
+    assert inner["collision_settings"]["use_collision"] is True
+    assert inner["collision_settings"]["distance_min"] == 0.015
+    # Internal RNA fields must not leak through.
+    assert "rna_type" not in inner["settings"]
+    assert "bl_rna" not in inner["collision_settings"]
+    # effector_weights must be picked up via the deep walk; without it
+    # peers won't reproduce gravity / wind / vortex weighting.
+    assert "__deep__" in inner["settings"]
+    deep = inner["settings"]["__deep__"]["effector_weights"]
+    assert deep["gravity"] == 1.0
+    assert deep["wind"] == 0.5
+    assert "rna_type" not in deep
+
+
+def test_modifier_serialize_handles_no_nested_settings():
+    """A modifier with no physics struct shouldn't grow a `nested` key."""
+    from blender_sync.adapters.scene.categories.modifier import (
+        ModifierCategoryHandler,
+    )
+
+    class FakeMod:
+        name = "Subsurf"
+        type = "SUBSURF"
+        levels = 2
+        render_levels = 3
+
+    h = ModifierCategoryHandler()
+    out = h._serialize_modifier(FakeMod())
+    assert "nested" not in out
+    assert out["props"]["levels"] == 2
+
+
 def test_shape_keys_serialize_includes_interpolation():
     """Ensures shape-key handler picks up `interpolation` (Blender 4 ease
     curve enum) so peers reproduce non-linear blends."""
