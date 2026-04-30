@@ -31,6 +31,7 @@ class DirtySnapshot:
     render: bool
     compositor: bool
     scene_world: bool
+    vse_strip: bool
 
     def is_empty(self) -> bool:
         return (
@@ -60,6 +61,7 @@ class DirtySnapshot:
             and not self.render
             and not self.compositor
             and not self.scene_world
+            and not self.vse_strip
         )
 
 
@@ -91,6 +93,7 @@ class DirtyTracker:
     render: bool = False
     compositor: bool = False
     scene_world: bool = False
+    vse_strip: bool = False
 
     def mark_transform(self, obj_name: str) -> None:
         self.objects_transform.add(obj_name)
@@ -118,6 +121,9 @@ class DirtyTracker:
 
     def mark_scene_world(self) -> None:
         self.scene_world = True
+
+    def mark_vse_strip(self) -> None:
+        self.vse_strip = True
 
     def mark_camera(self, name: str) -> None:
         self.cameras.add(name)
@@ -198,6 +204,7 @@ class DirtyTracker:
             render=self.render,
             compositor=self.compositor,
             scene_world=self.scene_world,
+            vse_strip=self.vse_strip,
         )
         self.objects_transform.clear()
         self.objects_visibility.clear()
@@ -225,4 +232,5 @@ class DirtyTracker:
         self.render = False
         self.compositor = False
         self.scene_world = False
+        self.vse_strip = False
         return snap

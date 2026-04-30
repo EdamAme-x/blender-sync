@@ -22,7 +22,7 @@ _OFF_KW = dict(
     armature=False, pose=False, shape_keys=False,
     constraints=False, grease_pencil=False, curve=False, particle=False,
     node_group=False, texture=False, lattice=False, metaball=False,
-    volume=False, point_cloud=False,
+    volume=False, point_cloud=False, vse_strip=False,
 )
 
 
@@ -58,6 +58,7 @@ def test_enabled_categories_default_includes_all():
         CategoryKind.METABALL,
         CategoryKind.VOLUME,
         CategoryKind.POINT_CLOUD,
+        CategoryKind.VSE_STRIP,
     ):
         assert needed in cats, f"missing {needed}"
 
@@ -132,6 +133,7 @@ class _FakeSnap:
     metaballs = frozenset()
     volumes = frozenset()
     point_clouds = frozenset()
+    vse_strip = False
     render = False
     compositor = False
     scene_world = False
@@ -382,6 +384,63 @@ def test_dirty_tracker_carries_volume_point_cloud():
 def test_volume_point_cloud_use_reliable_channel():
     assert CATEGORY_TO_CHANNEL[CategoryKind.VOLUME] is ChannelKind.RELIABLE
     assert CATEGORY_TO_CHANNEL[CategoryKind.POINT_CLOUD] is ChannelKind.RELIABLE
+
+
+def test_vse_strip_handler_no_bpy_graceful():
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        vse_strip = True
+
+    h = VSEStripCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+    assert h.build_full() == []
+
+
+def test_vse_strip_uses_reliable_channel():
+    assert CATEGORY_TO_CHANNEL[CategoryKind.VSE_STRIP] is ChannelKind.RELIABLE
+
+
+def test_dirty_tracker_carries_vse_strip():
+    t = DirtyTracker()
+    t.mark_vse_strip()
+    snap = t.flush()
+    assert snap.vse_strip is True
+    assert t.flush().is_empty()
+
+
+def test_vse_strip_collect_skipped_when_flag_clear():
+    """If DirtyContext.vse_strip is False, the handler must short-circuit
+    without paying the bpy import."""
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        vse_strip = False
+
+    h = VSEStripCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+
+
+def test_vse_strip_hash_dedupe():
+    """Repeated identical timeline payloads must not be re-sent.
+    Drives the per-scene hash cache path."""
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    h = VSEStripCategoryHandler()
+    op = {"scene": "Scene", "active": True, "strips": []}
+    d1 = h._hash_op(op)
+    d2 = h._hash_op({"scene": "Scene", "active": True, "strips": []})
+    assert d1 == d2
+    assert d1 != h._hash_op({"scene": "Scene", "active": True,
+                              "strips": [{"name": "S1"}]})
 
 
 def test_pose_serializes_custom_shape_fields_when_present():

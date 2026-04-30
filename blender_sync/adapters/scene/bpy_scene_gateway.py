@@ -24,6 +24,7 @@ from .categories.particle import ParticleCategoryHandler
 from .categories.point_cloud import PointCloudCategoryHandler
 from .categories.texture import TextureCategoryHandler
 from .categories.volume import VolumeCategoryHandler
+from .categories.vse_strip import VSEStripCategoryHandler
 from .categories.light import LightCategoryHandler
 from .categories.material import MaterialCategoryHandler
 from .categories.material_slots import MaterialSlotsCategoryHandler
@@ -115,6 +116,7 @@ class BpySceneGateway(ISceneGateway):
             CategoryKind.CAMERA: CameraCategoryHandler(),
             CategoryKind.LIGHT: LightCategoryHandler(),
             CategoryKind.ANIMATION: AnimationCategoryHandler(),
+            CategoryKind.VSE_STRIP: VSEStripCategoryHandler(),
             # Tier 4: maintenance ops — must run last so deletion/rename
             # don't trip up references in earlier tiers.
             CategoryKind.RENAME: RenameCategoryHandler(),
@@ -260,6 +262,8 @@ class BpySceneGateway(ISceneGateway):
             return bool(snap.volumes)
         if category is CategoryKind.POINT_CLOUD:
             return bool(snap.point_clouds)
+        if category is CategoryKind.VSE_STRIP:
+            return bool(getattr(snap, "vse_strip", False))
         return False
 
     def apply_ops(self, category: CategoryKind, ops: list[dict[str, Any]]) -> None:
@@ -467,6 +471,10 @@ class BpySceneGateway(ISceneGateway):
                             gateway._tracker.mark_animation(f"world:{obj_name}")
                     elif isinstance(obj, bpy.types.Scene):
                         gateway._tracker.mark_scene_world()
+                        # VSE strip changes route through Scene updates;
+                        # the strip handler itself hashes content so a
+                        # false-positive here just becomes a no-op send.
+                        gateway._tracker.mark_vse_strip()
             except Exception as exc:
                 gateway._logger.debug("depsgraph iter failed: %s", exc)
 
