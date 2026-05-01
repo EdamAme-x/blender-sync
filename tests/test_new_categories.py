@@ -670,7 +670,16 @@ def test_vse_strip_hash_dedupe():
                               "strips": [{"name": "S1"}]})
 
 
-def test_vse_remote_apply_clears_hash_so_return_to_local_a_resends(monkeypatch):
+def test_vse_remote_apply_caches_applied_hash_so_return_to_local_a_resends(monkeypatch):
+    """P2-6 + P2-17 contract:
+
+    - After applying a remote op, the cache must reflect *that*
+      remote op's shape so the receiver doesn't immediately echo it
+      back (P2-17 ping-pong fix).
+    - But a subsequent local edit that produces a different shape —
+      including reverting to the prior local A — must still re-send
+      (P2-6 round-trip use case).
+    """
     from blender_sync.adapters.scene.categories.base import DirtyContext
     from blender_sync.adapters.scene.categories.vse_strip import (
         VSEStripCategoryHandler,
@@ -704,14 +713,54 @@ def test_vse_remote_apply_clears_hash_so_return_to_local_a_resends(monkeypatch):
     ctx = DirtyContext(S())
     first = h.collect(ctx)
     assert first
+    # Same local state — dedupe.
     assert h.collect(ctx) == []
 
-    h.apply([{"scene": "Scene", "active": False, "strips": []}])
-    assert "Scene" not in h._sent_hash
+    # Remote applies a different timeline ("active=False" / no strips).
+    remote_op = {"scene": "Scene", "active": False, "strips": []}
+    h.apply([remote_op])
+    # Cache now reflects the *remote* op's hash. We don't immediately
+    # re-broadcast because the local depsgraph dirty event (which
+    # we'd see in real Blender right after our apply) collects
+    # against the same shape.
+    assert "Scene" in h._sent_hash
+    cached_after_apply = h._sent_hash["Scene"]
+    assert cached_after_apply == h._hash_op(remote_op)
 
+    # Local user reverts to timeline A. Hash differs from the cached
+    # remote op, so collect re-emits.
     set_timeline(scene, ["A"])
     resend = h.collect(ctx)
     assert resend == first
+
+
+def test_vse_remote_apply_does_not_immediately_rebroadcast(monkeypatch):
+    """P2-17: after a remote apply, an immediate collect for the same
+    state must NOT re-emit. Otherwise peers ping-pong identical
+    timelines indefinitely."""
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    class S(_FakeSnap):
+        vse_strip = True
+
+    scene = _FakeVSEScene("Scene")
+    # Match the remote op shape: active=False, no strips.
+    scene.sequence_editor = None
+    _install_fake_vse_bpy(monkeypatch, [scene], scene)
+
+    h = VSEStripCategoryHandler()
+    ctx = DirtyContext(S())
+
+    remote_op = {"scene": "Scene", "active": False, "strips": []}
+    h.apply([remote_op])
+
+    # The very next collect — simulating depsgraph dirty after our
+    # apply — must NOT re-emit the just-applied state.
+    out = h.collect(ctx)
+    assert out == []
 
 
 def test_vse_apply_missing_named_scene_does_not_clear_active(monkeypatch):

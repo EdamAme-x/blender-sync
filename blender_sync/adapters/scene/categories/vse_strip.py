@@ -315,10 +315,20 @@ class VSEStripCategoryHandler:
                 scene = bpy.context.scene
             if scene is None:
                 continue
+            self._apply_scene(bpy, scene, op)
+            # Cache the applied op's hash AFTER apply so the next
+            # collect sees "applied state == last sent state" and
+            # skips broadcasting it back. Without this, the depsgraph
+            # update triggered by our own apply marks the scene dirty
+            # and the resulting collect re-sends the same timeline,
+            # producing a ping-pong loop with peers. We still want a
+            # *local* edit that produces the SAME timeline shape as
+            # the remote (e.g. A → remote B → local A) to re-send,
+            # which works because the post-A hash equals the cached
+            # pre-A hash, not the just-applied B.
             scene_name = getattr(scene, "name", None)
             if isinstance(scene_name, str):
-                self._sent_hash.pop(scene_name, None)
-            self._apply_scene(bpy, scene, op)
+                self._sent_hash[scene_name] = self._hash_op(op)
 
     def _apply_scene(self, bpy, scene, op: dict[str, Any]) -> None:
         active = bool(op.get("active", False))
