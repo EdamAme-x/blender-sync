@@ -115,7 +115,25 @@ class ApplyRemotePacketUseCase:
           - drains held-back queue when in-order resumes
         """
         if packet.chain == 0 or packet.force:
-            # Fast / unreliable / force packets: bypass chain, but apply.
+            # Fast / unreliable / force packets bypass chain verification
+            # entirely, but they still consume a seq from the sender's
+            # PacketBuilder counter. If we don't advance `expected_seq`
+            # past their seq, the next reliable packet that arrives is
+            # misclassified as a gap (we'd be waiting for a chain seq we
+            # already saw on the fast lane), and NACK/RESEND wedges the
+            # session because the requested seq has chain==0 / force=True
+            # and isn't in the sender's reliable history.
+            #
+            # Bump expected_seq forward so reliable packets after a burst
+            # of fast / force packets are processed in order. last_verified_seq
+            # is intentionally NOT advanced — those packets are not part
+            # of the chain we verify against.
+            st = self._state(packet.author)
+            if packet.seq >= st.expected_seq:
+                st.expected_seq = packet.seq + 1
+                # A held-back reliable packet might now be in order if we
+                # were waiting on a seq that turned out to be fast/force.
+                self._drain_held_back(packet.author)
             return True
 
         st = self._state(packet.author)

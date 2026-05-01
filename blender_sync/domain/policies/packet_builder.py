@@ -121,20 +121,83 @@ class OutboundHistory:
 
 
 def lww_key(category: CategoryKind, op: dict[str, Any]) -> str:
+    """Per-op LWW key.
+
+    Each op carries some natural identifier (object name, material name,
+    datablock name, owner+kind for deletion / rename, etc.). LWW must
+    key by *that* identifier so two ops in the same packet for two
+    distinct datablocks don't share a key — otherwise the second op
+    looks like a duplicate of the first and is rejected.
+
+    Singletons (compositor, render, scene world, view3d) legitimately
+    share a key across the category — they only ever carry one op per
+    packet.
+    """
+    # Object-side ops keyed by Object name (`n` for transform/visibility,
+    # `obj` for everything that hangs off an Object).
     if category is CategoryKind.TRANSFORM:
         return f"transform:{op.get('n', '')}"
-    if category is CategoryKind.MATERIAL:
-        return f"material:{op.get('mat', '')}"
-    if category is CategoryKind.MODIFIER:
-        return f"modifier:{op.get('obj', '')}"
-    if category is CategoryKind.MESH:
-        return f"mesh:{op.get('obj', '')}"
     if category is CategoryKind.VISIBILITY:
         return f"visibility:{op.get('n', '')}"
+    if category is CategoryKind.MODIFIER:
+        return f"modifier:{op.get('obj', '')}"
+    if category is CategoryKind.MATERIAL_SLOTS:
+        return f"material_slots:{op.get('obj', '')}"
+    if category is CategoryKind.MESH:
+        return f"mesh:{op.get('obj', '')}"
+    if category is CategoryKind.POSE:
+        return f"pose:{op.get('obj', '')}"
+    if category is CategoryKind.SHAPE_KEYS:
+        return f"shape_keys:{op.get('obj', '')}"
+    if category is CategoryKind.CONSTRAINTS:
+        return f"constraints:{op.get('obj', '')}"
+    if category is CategoryKind.PARTICLE:
+        return f"particle:{op.get('obj', '')}"
+
+    # Material datablock: keyed by mat name.
+    if category is CategoryKind.MATERIAL:
+        return f"material:{op.get('mat', '')}"
+
+    # Deletion / Rename: identified by (kind, name) and (kind, uid).
+    # Without per-op keys here, a packet that deletes 5 datablocks would
+    # only delete the first one because the rest would look like
+    # duplicates of the same LWW slot.
+    if category is CategoryKind.DELETION:
+        return f"deletion:{op.get('kind', '')}:{op.get('name', '')}"
+    if category is CategoryKind.RENAME:
+        return f"rename:{op.get('kind', '')}:{op.get('uid', '')}"
+
+    # Animation owners: each fanned-out owner gets its own key.
+    if category is CategoryKind.ANIMATION:
+        return (
+            f"animation:{op.get('owner_type', 'object')}"
+            f":{op.get('owner', '')}"
+        )
+
+    # VSE strip ops are per-scene (one op per Scene that has a VSE).
+    if category is CategoryKind.VSE_STRIP:
+        return f"vse_strip:{op.get('scene', '')}"
+
+    # Datablock-level singletons keyed by `name`.
+    if category in (
+        CategoryKind.IMAGE, CategoryKind.TEXTURE, CategoryKind.NODE_GROUP,
+        CategoryKind.ARMATURE,
+        CategoryKind.CAMERA, CategoryKind.LIGHT, CategoryKind.COLLECTION,
+        CategoryKind.GREASE_PENCIL, CategoryKind.CURVE,
+        CategoryKind.LATTICE, CategoryKind.METABALL,
+        CategoryKind.VOLUME, CategoryKind.POINT_CLOUD,
+        CategoryKind.SOUND,
+    ):
+        return f"{category.value}:{op.get('name', '')}"
+
+    # True singletons — only ever one op per packet.
     if category is CategoryKind.RENDER:
         return "render:scene"
     if category is CategoryKind.COMPOSITOR:
         return "compositor:scene"
     if category is CategoryKind.SCENE:
         return "scene:world"
+    if category is CategoryKind.VIEW3D:
+        return "view3d:active"
+
     return f"{category.value}:misc"
