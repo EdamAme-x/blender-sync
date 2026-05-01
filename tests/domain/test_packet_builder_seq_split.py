@@ -137,6 +137,97 @@ def test_view3d_pose_categories_use_unreliable_seq():
     assert seq.current == 0
 
 
+def test_control_packets_do_not_consume_reliable_seq_or_chain():
+    """P1-9: control traffic (ping/pong/NACK/RESEND/HELLO/PULL) is
+    dispatched on the receiver before chain verification, so it must
+    NOT consume reliable seq or chain on the sender — otherwise the
+    two sides drift and the next reliable packet (incl. force) NACKs
+    a seq that will never be replayed.
+
+    Confirms that:
+      1. control packets ride the unreliable counter,
+      2. they carry chain == 0,
+      3. they don't move the reliable counter.
+    """
+    seq = SeqCounter()
+    b = PacketBuilder("me", seq=seq)
+    ctrl1 = b.build(CategoryKind.CONTROL,
+                    [{"op": "ping", "ts": 1.0}], 1.0)
+    ctrl2 = b.build(CategoryKind.CONTROL,
+                    [{"op": "nack", "from": 5, "to": 5}], 2.0)
+    rel1 = b.build(CategoryKind.MATERIAL, [{"mat": "M"}], 3.0)
+
+    assert ctrl1.chain == 0
+    assert ctrl2.chain == 0
+    # Reliable counter never moved through the controls.
+    assert rel1.seq == 1
+    assert seq.current == 1
+    # Unreliable counter advanced for both control packets.
+    assert ctrl1.seq == 1
+    assert ctrl2.seq == 2
+
+
+def test_force_after_control_does_not_wedge():
+    """End-to-end: send 3 control packets then a force packet. Receiver
+    must accept the force packet without NACK'ing missing control
+    seqs."""
+    from blender_sync.domain.policies.echo_filter import EchoFilter
+    from blender_sync.domain.policies.lww_resolver import LWWResolver
+    from blender_sync.domain.entities import SyncConfig
+    from blender_sync.usecases.apply_remote import ApplyRemotePacketUseCase
+    from tests.fakes.logger import RecordingLogger
+    from tests.fakes.scene_gateway import FakeSceneGateway
+
+    class _Codec:
+        def __init__(self):
+            self._m = {}
+        def encode(self, p):
+            k = id(p).to_bytes(8, "little")
+            self._m[k] = p
+            return k
+        def decode(self, d):
+            return self._m[d]
+
+    scene = FakeSceneGateway()
+    codec = _Codec()
+    cfg = SyncConfig(peer_id="me")
+    uc = ApplyRemotePacketUseCase(
+        scene, codec, EchoFilter(self_peer_id="me"),
+        LWWResolver(), RecordingLogger(), cfg,
+    )
+    nacks: list = []
+    uc.set_nack_emitter(lambda a, f, l: nacks.append((a, f, l)))
+
+    builder = PacketBuilder("alice", seq=SeqCounter())
+    # 3 control packets first.
+    c1 = builder.build(CategoryKind.CONTROL,
+                       [{"op": "ping", "ts": 1.0}], 1.0)
+    c2 = builder.build(CategoryKind.CONTROL,
+                       [{"op": "ping", "ts": 2.0}], 2.0)
+    c3 = builder.build(CategoryKind.CONTROL,
+                       [{"op": "pong", "ts": 3.0}], 3.0)
+    # Then a force packet.
+    force = builder.build(CategoryKind.MATERIAL,
+                          [{"mat": "Mat", "use_nodes": True}], 4.0,
+                          force=True)
+
+    # Need a control handler so dispatch doesn't NPE.
+    from blender_sync.domain.entities import Session, Peer
+    sess = Session(local_peer=Peer(peer_id="me"))
+    uc.set_control_handler(sess, lambda s, ops: None)
+
+    uc.apply_raw(codec.encode(c1))
+    uc.apply_raw(codec.encode(c2))
+    uc.apply_raw(codec.encode(c3))
+    uc.apply_raw(codec.encode(force))
+
+    # Force packet got applied (1 op).
+    assert len(scene.applied) == 1
+    assert scene.applied[0][0] is CategoryKind.MATERIAL
+    # No spurious NACK from the receiver.
+    assert nacks == []
+
+
 def test_categories_match_channel_table():
     """Every category in the project goes through PacketBuilder.build,
     and chain==0 must agree with CATEGORY_TO_CHANNEL=FAST."""

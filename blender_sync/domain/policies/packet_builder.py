@@ -81,15 +81,22 @@ class PacketBuilder:
         ts: float,
         force: bool = False,
     ) -> Packet:
+        # CONTROL packets are dispatched on the receiver before chain
+        # verification (apply_remote._dispatch_control), so if they
+        # consumed reliable seq/chain on the sender, the two sides
+        # would drift and the next force/reliable packet would NACK a
+        # control seq that was never going to fill the gap. Treat
+        # CONTROL as out-of-band: separate seq counter, no chain.
         on_reliable_chain = (
             CATEGORY_TO_CHANNEL[category] is ChannelKind.RELIABLE
+            and category is not CategoryKind.CONTROL
         )
         if on_reliable_chain:
             seq = self._seq.next()
         else:
-            # Fast / unreliable packet: separate seq space, chain
-            # skipped. Force packets stay on the reliable chain so that
-            # NACK/RESEND continues working past a force push.
+            # Fast / control / unreliable packet: separate seq space,
+            # chain skipped. Force packets stay on the reliable chain
+            # so that NACK/RESEND continues working past a force push.
             seq = self._unreliable_seq.next()
 
         skeleton = Packet(
