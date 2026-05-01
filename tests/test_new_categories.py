@@ -23,7 +23,7 @@ _OFF_KW = dict(
     constraints=False, grease_pencil=False, curve=False, particle=False,
     node_group=False, texture=False, lattice=False, metaball=False,
     volume=False, point_cloud=False, vse_strip=False,
-    sound=False,
+    sound=False, view3d=False,
 )
 
 
@@ -61,6 +61,7 @@ def test_enabled_categories_default_includes_all():
         CategoryKind.POINT_CLOUD,
         CategoryKind.VSE_STRIP,
         CategoryKind.SOUND,
+        CategoryKind.VIEW3D,
     ):
         assert needed in cats, f"missing {needed}"
 
@@ -137,6 +138,7 @@ class _FakeSnap:
     point_clouds = frozenset()
     sounds = frozenset()
     vse_strip = False
+    view3d = False
     render = False
     compositor = False
     scene_world = False
@@ -566,6 +568,68 @@ def test_compositor_serialize_emits_use_viewer_border():
     op = out[0]
     assert op["use_nodes"] is True
     assert op["tree_props"]["use_viewer_border"] is True
+
+
+def test_view3d_uses_fast_channel():
+    """3D-view shading is interactive UI state — losing the occasional
+    flip is fine. Wire on the FAST channel like transform."""
+    assert CATEGORY_TO_CHANNEL[CategoryKind.VIEW3D] is ChannelKind.FAST
+
+
+def test_view3d_handler_no_bpy_graceful():
+    from blender_sync.adapters.scene.categories.view3d import (
+        View3DCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        view3d = True
+
+    h = View3DCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+    assert h.build_full() == []
+
+
+def test_dirty_tracker_carries_view3d():
+    t = DirtyTracker()
+    t.mark_view3d()
+    snap = t.flush()
+    assert snap.view3d is True
+    assert t.flush().is_empty()
+
+
+def test_modifier_geometry_nodes_id_props_round_trip():
+    """Geometry Nodes modifier instances hide their input bindings in
+    ID-props (`Input_<n>`, `..._attribute_name`, `..._use_attribute`).
+    Walker must pull these via `.keys()` because dir() doesn't list
+    them."""
+    from blender_sync.adapters.scene.categories.modifier import (
+        ModifierCategoryHandler,
+    )
+
+    class FakeNodesMod:
+        name = "GeometryNodes"
+        type = "NODES"
+        show_viewport = True
+
+        _store = {
+            "Input_2": 0.5,
+            "Input_2_use_attribute": False,
+            "Input_2_attribute_name": "density",
+            "Input_3": 4,
+        }
+
+        def keys(self): return list(self._store.keys())
+        def __getitem__(self, k): return self._store[k]
+
+    h = ModifierCategoryHandler()
+    out = h._serialize_modifier(FakeNodesMod())
+    assert out["type"] == "NODES"
+    ip = out["id_props"]
+    assert ip["Input_2"] == 0.5
+    assert ip["Input_2_use_attribute"] is False
+    assert ip["Input_2_attribute_name"] == "density"
+    assert ip["Input_3"] == 4
 
 
 def test_sound_serialize_picks_filepath():

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _nodetree
+from . import _id_props, _nodetree
 
 
 class MaterialCategoryHandler:
@@ -61,6 +61,9 @@ class MaterialCategoryHandler:
             iface = _nodetree.serialize_tree_interface(mat.node_tree)
             if iface:
                 op["interface"] = iface
+        ip = _id_props.serialize_id_props(mat)
+        if ip:
+            op["id_props"] = ip
         return op
 
     def apply(self, ops: list[dict[str, Any]]) -> None:
@@ -111,6 +114,7 @@ class MaterialCategoryHandler:
             iface = op.get("interface")
             if iface:
                 _nodetree.apply_tree_interface(mat.node_tree, iface)
+        _id_props.apply_id_props(mat, op.get("id_props") or {})
 
     def build_full(self) -> list[dict[str, Any]]:
         try:

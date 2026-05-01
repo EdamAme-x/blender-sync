@@ -117,6 +117,7 @@ class SYNC_PT_filters(Panel):
         col.prop(state, "sync_point_cloud")
         col.prop(state, "sync_vse_strip")
         col.prop(state, "sync_sound")
+        col.prop(state, "sync_view3d")
 
         layout.separator()
         layout.label(text=_("Mesh:"))

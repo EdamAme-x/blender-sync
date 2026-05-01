@@ -130,6 +130,7 @@ class BpyConfigReader:
             point_cloud=bool(st.sync_point_cloud),
             vse_strip=bool(st.sync_vse_strip),
             sound=bool(st.sync_sound),
+            view3d=bool(st.sync_view3d),
         )
 
     def read_transport_config(self) -> TransportConfig | None:
