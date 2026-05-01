@@ -78,13 +78,10 @@ class SoundCategoryHandler:
                     continue
                 try:
                     snd = bpy.data.sounds.load(fp, check_existing=True)
-                    if snd.name != name:
-                        try:
-                            snd.name = name
-                        except Exception:
-                            pass
                 except Exception:
                     continue
+                if snd.name != name:
+                    self._rename_into(bpy, snd, name)
             for k, v in (op.get("props") or {}).items():
                 if not hasattr(snd, k):
                     continue
@@ -98,6 +95,26 @@ class SoundCategoryHandler:
                         setattr(snd, k, v)
                 except Exception:
                     pass
+
+    def _rename_into(self, bpy, snd, target_name: str) -> None:
+        """Rename `snd` to `target_name`. If another Sound already owns
+        that name, push it to a uid-suffixed temp first so Blender
+        doesn't silently append `.001` to ours and leave the wire and
+        local names diverged.
+        """
+        existing = bpy.data.sounds.get(target_name)
+        if existing is not None and existing is not snd:
+            # 6-char filename hash is enough — collisions astronomically
+            # unlikely, no uid stamping needed for a transient name.
+            tmp = f"{target_name}.bsync_tmp_{abs(hash(snd.filepath)) & 0xffffff:06x}"
+            try:
+                existing.name = tmp
+            except Exception:
+                return
+        try:
+            snd.name = target_name
+        except Exception:
+            pass
 
     def build_full(self) -> list[dict[str, Any]]:
         try:
