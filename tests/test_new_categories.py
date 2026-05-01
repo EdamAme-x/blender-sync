@@ -443,6 +443,62 @@ def test_vse_strip_hash_dedupe():
                               "strips": [{"name": "S1"}]})
 
 
+def test_vse_effect_constants_match_blender_5():
+    """`new_effect` enum in Blender 5 dropped TRANSFORM and OVER_DROP.
+    The handler's effect-type sets must reflect that — sending an
+    invalid type to a peer would raise on `new_effect` and the strip
+    would silently be lost. Lock the valid set with a test."""
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+
+    # TRANSFORM and OVER_DROP must NOT appear anywhere in the effect
+    # type buckets. Blender 5 supplants them with the per-strip
+    # `Strip.transform` sub-struct (handled separately in serialize).
+    all_effects = (
+        vsm._ZERO_INPUT_EFFECTS
+        | vsm._ONE_INPUT_EFFECTS
+        | vsm._TWO_INPUT_EFFECTS
+    )
+    assert "TRANSFORM" not in all_effects
+    assert "OVER_DROP" not in all_effects
+    # Sanity: the documented Blender 5 enum values we care about.
+    assert "COLOR" in vsm._ZERO_INPUT_EFFECTS
+    assert "TEXT" in vsm._ZERO_INPUT_EFFECTS
+    assert "GAUSSIAN_BLUR" in vsm._ONE_INPUT_EFFECTS
+    assert "GLOW" in vsm._ONE_INPUT_EFFECTS
+    assert "MULTICAM" in vsm._ONE_INPUT_EFFECTS
+    assert "CROSS" in vsm._TWO_INPUT_EFFECTS
+    assert "COLORMIX" in vsm._TWO_INPUT_EFFECTS
+
+
+def test_vse_strip_serialize_omits_transform_legacy_props():
+    """The legacy TRANSFORM strip-type and its `translate_start_x`
+    family are gone in Blender 5. Make sure the handler doesn't
+    reintroduce them via _TYPE_SPECIFIC."""
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+
+    assert "TRANSFORM" not in vsm._TYPE_SPECIFIC
+    for fields in vsm._TYPE_SPECIFIC.values():
+        for f in fields:
+            assert not f.startswith("translate_start_"), (
+                f"legacy field {f} leaked into _TYPE_SPECIFIC"
+            )
+
+
+def test_vse_apply_blacklist_rejects_input_keys():
+    """`input_1` / `input_2` are wire-only; the apply loop must not
+    setattr them onto the strip (they're populated via the new_effect
+    constructor in the second pass)."""
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    blacklist = VSEStripCategoryHandler._APPLY_BLACKLIST
+    assert "input_1" in blacklist
+    assert "input_2" in blacklist
+    assert "length" in blacklist
+    assert "transform" in blacklist  # handled via dedicated branch
+
+
 def test_pose_serializes_custom_shape_fields_when_present():
     """Verifies the custom-shape fields serialize through the duck-typed
     fallback path. Catches typos in the wire field names."""

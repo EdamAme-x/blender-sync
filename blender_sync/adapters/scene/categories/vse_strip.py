@@ -1,17 +1,21 @@
 """Video Sequence Editor strip handler.
 
 Synchronizes the active scene's VSE timeline:
-  - strip frame placement (frame_start, frame_final_*, channel)
+  - strip frame placement (frame_start, channel)
   - strip type and source (filepath for IMAGE/MOVIE/SOUND, color for COLOR)
   - blend / mute / lock / opacity
+  - per-strip Transform sub-struct (offset / scale / rotation / filter)
   - speed / volume / pitch / pan for sound and effect strips
 
-VSE in Blender 5 renamed `bpy.types.Sequence` -> `bpy.types.Strip`. Both
-exist via aliases for now; we read whatever the running build exposes.
+Blender 5 renamed `bpy.types.Sequence` -> `bpy.types.Strip` and
+`sequence_editor.sequences*` -> `sequence_editor.strips*`. The legacy
+names still work in early 5.x as deprecated aliases; we read whichever
+the running build exposes.
 
-Re-applying tears down the timeline and rebuilds it. The cost is
-acceptable because edits are typically infrequent (compared with viewport
-transforms) and rebuild guarantees we don't end up with partial state.
+Apply rebuilds from a clean state (`sequence_editor_clear` +
+`sequence_editor_create`) so nothing nested in metas leaks across
+syncs. Effect strips that need input1/input2 are created in a second
+pass once their inputs exist.
 """
 from __future__ import annotations
 
@@ -22,12 +26,14 @@ from typing import Any
 from . import _datablock_ref
 from .base import DirtyContext
 
-# Common primitive props that exist on most/all strip types.
+# Common primitive props that exist on most/all strip types and are
+# safe to round-trip via setattr. Read-only computed fields like
+# `frame_final_*` and `frame_still_*` are intentionally absent — they
+# derive from `frame_start` + `frame_offset_*` + content length and
+# Blender computes them on its own.
 _COMMON_PROPS = (
     "name", "type", "channel",
-    "frame_start", "frame_final_start", "frame_final_end",
-    "frame_offset_start", "frame_offset_end",
-    "frame_still_start", "frame_still_end",
+    "frame_start",
     "blend_alpha", "blend_type",
     "mute", "lock", "select",
     "use_proxy", "use_flip_x", "use_flip_y",
@@ -36,7 +42,17 @@ _COMMON_PROPS = (
     "speed_factor",
 )
 
+# `frame_offset_*` is only writable on strips that have an underlying
+# source (movie / sound / image / scene / movieclip / mask / meta).
+# Effect strips (color, text, transitions) raise on assignment.
+_OFFSET_BEARING_TYPES = {
+    "MOVIE", "SOUND", "IMAGE", "SCENE", "MOVIECLIP", "MASK", "META",
+}
+
 # Type-specific props. Walked in addition to the common set.
+# `TRANSFORM` is intentionally absent — Blender 5 removed the
+# transform-effect strip type; the `Strip.transform` sub-struct on
+# every strip subsumed it.
 _TYPE_SPECIFIC = {
     "SOUND": (
         "volume", "pitch", "pan",
@@ -55,15 +71,30 @@ _TYPE_SPECIFIC = {
         "align_x", "align_y",
         "location", "color",
     ),
-    "TRANSFORM": (
-        "translate_start_x", "translate_start_y",
-        "rotation_start", "scale_start_x", "scale_start_y",
-        "use_uniform_scale", "interpolation",
-    ),
     "GAUSSIAN_BLUR": (
         "size_x", "size_y",
     ),
 }
+
+# Effect types in Blender 5's `new_effect` enum. `TRANSFORM` and
+# `OVER_DROP` are gone; `MULTICAM` and `COLORMIX` were retained.
+_TWO_INPUT_EFFECTS = {
+    "CROSS", "GAMMA_CROSS", "ADD", "SUBTRACT",
+    "ALPHA_OVER", "ALPHA_UNDER", "MULTIPLY", "WIPE",
+    "COLORMIX",
+}
+_ONE_INPUT_EFFECTS = {
+    "GLOW", "GAUSSIAN_BLUR", "SPEED", "ADJUSTMENT", "MULTICAM",
+}
+_ZERO_INPUT_EFFECTS = {"COLOR", "TEXT"}
+
+_TRANSFORM_PROPS = (
+    "offset_x", "offset_y",
+    "scale_x", "scale_y",
+    "rotation",
+    "origin",   # 2-vec
+    "filter",
+)
 
 
 class VSEStripCategoryHandler:
@@ -85,6 +116,14 @@ class VSEStripCategoryHandler:
         scene = bpy.context.scene
         if scene is None:
             return []
+        # Prune cache entries for scenes that no longer exist — without
+        # this, a deleted-then-recreated scene with the same name would
+        # have its first sync silently suppressed.
+        live_names = {s.name for s in bpy.data.scenes}
+        self._sent_hash = {
+            k: v for k, v in self._sent_hash.items() if k in live_names
+        }
+
         ops = self._serialize(scene)
         out: list[dict[str, Any]] = []
         for op in ops:
@@ -120,8 +159,7 @@ class VSEStripCategoryHandler:
         }]
 
     def _iter_strips(self, se):
-        # Blender 5 exposes both `strips_all` and the legacy
-        # `sequences_all`. Prefer the new name when present.
+        # Blender 5 uses `strips_all`; older builds use `sequences_all`.
         for attr in ("strips_all", "sequences_all"):
             coll = getattr(se, attr, None)
             if coll is None:
@@ -143,8 +181,19 @@ class VSEStripCategoryHandler:
                 continue
             if isinstance(v, (int, float, bool, str)):
                 out[k] = v
-        # Type-specific props.
         stype = out.get("type", "")
+
+        # frame_offset_* are writable only on source-bearing strips.
+        if stype in _OFFSET_BEARING_TYPES:
+            for k in ("frame_offset_start", "frame_offset_end"):
+                if hasattr(s, k):
+                    try:
+                        v = getattr(s, k)
+                        if isinstance(v, (int, float)):
+                            out[k] = v
+                    except Exception:
+                        pass
+
         for k in _TYPE_SPECIFIC.get(stype, ()):
             if not hasattr(s, k):
                 continue
@@ -159,27 +208,50 @@ class VSEStripCategoryHandler:
                     out[k] = [float(x) for x in v]
                 except Exception:
                     pass
-        # COLOR strip's color attr is a Vec3.
+
         if stype == "COLOR" and hasattr(s, "color"):
             try:
                 out["color"] = list(s.color)
             except Exception:
                 pass
+
+        # Per-strip Transform sub-struct (Blender 5). Encodes offset /
+        # scale / rotation / filter that live on `s.transform`.
+        tr = getattr(s, "transform", None)
+        if tr is not None:
+            tr_out: dict[str, Any] = {}
+            for k in _TRANSFORM_PROPS:
+                if not hasattr(tr, k):
+                    continue
+                try:
+                    v = getattr(tr, k)
+                except Exception:
+                    continue
+                if isinstance(v, (int, float, bool, str)):
+                    tr_out[k] = v
+                elif hasattr(v, "__iter__") and not isinstance(v, str):
+                    try:
+                        tr_out[k] = [float(x) for x in v]
+                    except Exception:
+                        pass
+            if tr_out:
+                out["transform"] = tr_out
+
         # Source paths / referenced datablocks.
-        if hasattr(s, "filepath"):
+        if stype in {"MOVIE", "IMAGE"} and hasattr(s, "filepath"):
             try:
                 fp = s.filepath
                 if isinstance(fp, str):
                     out["filepath"] = fp
             except Exception:
                 pass
-        if hasattr(s, "sound") and getattr(s, "sound", None) is not None:
+        if stype == "SOUND" and getattr(s, "sound", None) is not None:
             try:
                 out["sound_path"] = getattr(s.sound, "filepath", "") or ""
                 out["sound_name"] = s.sound.name
             except Exception:
                 pass
-        if hasattr(s, "scene") and getattr(s, "scene", None) is not None:
+        if stype == "SCENE" and getattr(s, "scene", None) is not None:
             ref = _datablock_ref.try_ref(s.scene)
             if ref is not None:
                 out["scene_ref"] = ref
@@ -187,6 +259,24 @@ class VSEStripCategoryHandler:
             ref = _datablock_ref.try_ref(s.scene_camera)
             if ref is not None:
                 out["scene_camera_ref"] = ref
+
+        # Effect input names — captured by name so we can stitch them
+        # back on the receiver during the second pass.
+        in1 = getattr(s, "input_1", None)
+        if in1 is not None and getattr(in1, "name", None):
+            out["input_1"] = in1.name
+        in2 = getattr(s, "input_2", None)
+        if in2 is not None and getattr(in2, "name", None):
+            out["input_2"] = in2.name
+
+        # Wire-supplied `length` lets effect strips reconstruct with
+        # the correct duration on the receiver.
+        try:
+            ff = int(getattr(s, "frame_final_duration", 0))
+            if ff > 0:
+                out["length"] = ff
+        except Exception:
+            pass
         return out
 
     def apply(self, ops: list[dict[str, Any]]) -> None:
@@ -202,19 +292,19 @@ class VSEStripCategoryHandler:
 
     def _apply_scene(self, bpy, scene, op: dict[str, Any]) -> None:
         active = bool(op.get("active", False))
+        # Always wipe the existing sequence editor first — otherwise
+        # nested meta-strip children would survive into the rebuild and
+        # collide with the new ones we're about to create.
+        try:
+            scene.sequence_editor_clear()
+        except Exception:
+            pass
         if not active:
-            # Sender has no sequence editor — clear ours to match.
-            try:
-                if scene.sequence_editor is not None:
-                    scene.sequence_editor_clear()
-            except Exception:
-                pass
             return
-        if scene.sequence_editor is None:
-            try:
-                scene.sequence_editor_create()
-            except Exception:
-                return
+        try:
+            scene.sequence_editor_create()
+        except Exception:
+            return
         se = scene.sequence_editor
         if se is None:
             return
@@ -224,34 +314,64 @@ class VSEStripCategoryHandler:
             except Exception:
                 pass
 
-        # Tear down existing strips, then rebuild from the wire.
-        # `strips` (new) / `sequences` (old) is the *editable* collection
-        # versus the *_all flattened views.
         coll = (
             getattr(se, "strips", None)
             or getattr(se, "sequences", None)
         )
         if coll is None:
             return
-        try:
-            for existing in list(coll):
-                coll.remove(existing)
-        except Exception:
-            pass
 
-        for sd in op.get("strips") or []:
-            stype = sd.get("type")
-            name = sd.get("name") or "Strip"
-            ch = int(sd.get("channel", 1))
-            fs = int(sd.get("frame_start", 1))
-            new_strip = self._create_strip(coll, stype, name, ch, fs, sd)
-            if new_strip is None:
+        wire_strips = list(op.get("strips") or [])
+
+        # Pass 1 — create everything that doesn't need other strips as
+        # inputs (sources + zero-input effects). Track created ones by
+        # the wire-supplied name so pass 2 can resolve input refs.
+        created: dict[str, Any] = {}
+        deferred: list[dict[str, Any]] = []
+        for sd in wire_strips:
+            stype = sd.get("type") or ""
+            if stype in _ONE_INPUT_EFFECTS or stype in _TWO_INPUT_EFFECTS:
+                deferred.append(sd)
                 continue
-            self._apply_strip_props(new_strip, sd)
+            new_strip = self._create_strip(coll, stype, sd, created)
+            if new_strip is not None:
+                created[sd.get("name") or new_strip.name] = new_strip
+                self._apply_strip_props(new_strip, sd)
 
-    def _create_strip(self, coll, stype: str, name: str, ch: int, fs: int, sd: dict):
-        # Each strip type has its own constructor on the strips/sequences
-        # collection. We use the public `new_*` API where possible.
+        # Pass 2 — effects, now that inputs may exist. We loop until
+        # no progress is made to handle chains.
+        while deferred:
+            progressed = False
+            still_pending: list[dict[str, Any]] = []
+            for sd in deferred:
+                stype = sd.get("type") or ""
+                in1_name = sd.get("input_1")
+                in2_name = sd.get("input_2") if stype in _TWO_INPUT_EFFECTS else None
+                if in1_name and in1_name not in created:
+                    still_pending.append(sd)
+                    continue
+                if (
+                    stype in _TWO_INPUT_EFFECTS
+                    and in2_name
+                    and in2_name not in created
+                ):
+                    still_pending.append(sd)
+                    continue
+                new_strip = self._create_strip(coll, stype, sd, created)
+                if new_strip is not None:
+                    created[sd.get("name") or new_strip.name] = new_strip
+                    self._apply_strip_props(new_strip, sd)
+                    progressed = True
+            if not progressed:
+                # Inputs missing; give up on the rest rather than loop.
+                break
+            deferred = still_pending
+
+    def _create_strip(self, coll, stype: str, sd: dict, created: dict):
+        name = sd.get("name") or "Strip"
+        ch = int(sd.get("channel", 1))
+        fs = int(sd.get("frame_start", 1))
+        length = int(sd.get("length", 1)) or 1
         try:
             if stype == "SOUND":
                 fp = sd.get("sound_path") or sd.get("filepath") or ""
@@ -266,31 +386,12 @@ class VSEStripCategoryHandler:
                 return coll.new_movie(name=name, filepath=fp,
                                       channel=ch, frame_start=fs)
             if stype == "IMAGE":
-                # IMAGE strips need the directory + a frame; for now we
-                # let the sender's wire description seed a single-frame
-                # placeholder — multi-image strips aren't fully covered.
-                directory = sd.get("directory") or ""
                 fp = sd.get("filepath") or ""
-                if not (directory or fp):
+                if not fp:
                     return None
                 return coll.new_image(name=name, filepath=fp,
                                       channel=ch, frame_start=fs)
-            if stype == "COLOR":
-                return coll.new_effect(name=name, type="COLOR",
-                                       channel=ch,
-                                       frame_start=fs,
-                                       frame_end=fs + 1)
-            if stype in ("TRANSFORM", "GAUSSIAN_BLUR", "ADJUSTMENT",
-                          "CROSS", "GAMMA_CROSS", "ADD", "SUBTRACT",
-                          "ALPHA_OVER", "ALPHA_UNDER", "MULTIPLY",
-                          "OVER_DROP", "WIPE", "GLOW", "SPEED"):
-                return coll.new_effect(name=name, type=stype, channel=ch,
-                                       frame_start=fs, frame_end=fs + 1)
-            if stype == "TEXT":
-                return coll.new_effect(name=name, type="TEXT", channel=ch,
-                                       frame_start=fs, frame_end=fs + 1)
             if stype == "SCENE":
-                # Resolve scene_ref to an actual scene if present.
                 token = sd.get("scene_ref")
                 target_scene = (
                     _datablock_ref.resolve_ref(token) if token else None
@@ -299,15 +400,41 @@ class VSEStripCategoryHandler:
                     return None
                 return coll.new_scene(name=name, scene=target_scene,
                                       channel=ch, frame_start=fs)
+            if stype in _ZERO_INPUT_EFFECTS:
+                return coll.new_effect(name=name, type=stype, channel=ch,
+                                       frame_start=fs, length=length)
+            if stype in _ONE_INPUT_EFFECTS:
+                in1 = created.get(sd.get("input_1") or "")
+                if in1 is None:
+                    return None
+                return coll.new_effect(name=name, type=stype, channel=ch,
+                                       frame_start=fs, length=length,
+                                       input1=in1)
+            if stype in _TWO_INPUT_EFFECTS:
+                in1 = created.get(sd.get("input_1") or "")
+                in2 = created.get(sd.get("input_2") or "")
+                if in1 is None or in2 is None:
+                    return None
+                return coll.new_effect(name=name, type=stype, channel=ch,
+                                       frame_start=fs, length=length,
+                                       input1=in1, input2=in2)
         except Exception:
             return None
         return None
 
+    _APPLY_BLACKLIST = {
+        "name", "type", "channel", "frame_start",
+        "filepath", "directory",
+        "sound_path", "sound_name",
+        "scene_ref", "scene_camera_ref",
+        "input_1", "input_2",
+        "length",
+        "transform",
+    }
+
     def _apply_strip_props(self, strip, sd: dict) -> None:
         for k, v in sd.items():
-            if k in {"name", "type", "channel", "frame_start", "filepath",
-                     "directory", "sound_path", "sound_name",
-                     "scene_ref", "scene_camera_ref"}:
+            if k in self._APPLY_BLACKLIST:
                 continue
             if not hasattr(strip, k):
                 continue
@@ -327,6 +454,24 @@ class VSEStripCategoryHandler:
             if cam is not None:
                 try:
                     strip.scene_camera = cam
+                except Exception:
+                    pass
+        # Per-strip Transform sub-struct.
+        tr_data = sd.get("transform") or {}
+        tr = getattr(strip, "transform", None)
+        if tr is not None and tr_data:
+            for k, v in tr_data.items():
+                if not hasattr(tr, k):
+                    continue
+                try:
+                    cur = getattr(tr, k)
+                    if isinstance(cur, (int, float)):
+                        setattr(tr, k, type(cur)(v))
+                    elif isinstance(cur, str):
+                        setattr(tr, k, v)
+                    elif hasattr(cur, "__iter__") and hasattr(v, "__iter__"):
+                        seq = tuple(float(x) for x in v)
+                        setattr(tr, k, seq)
                 except Exception:
                     pass
 
