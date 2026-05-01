@@ -187,26 +187,25 @@ def test_force_push_does_not_emit_nack():
 
 
 def test_force_push_replaces_state_on_repeat():
-    """Force packets are always-authoritative — a repeat realigns the
-    chain (idempotent on chain state) and re-applies the snapshot
-    payload (force ops bypass LWW gating). This is intentional: force
-    is the recovery primitive and must be safe to spam."""
+    """A duplicate force packet is dropped (stale: seq <=
+    last_verified_seq). A *newer* force at higher seq+ts applies. This
+    is the P1-12 contract: stale force resends must not silently
+    revert the scene."""
     uc, scene, codec = _make_uc()
     sender = PacketBuilder("alice", SeqCounter())
     f1 = sender.build(CategoryKind.MATERIAL, [{"mat": "A"}], 1.0, force=True)
     uc.apply_raw(codec.encode(f1))
     assert len(scene.applied) == 1
 
-    # Same packet again — chain state is reset to the same snapshot
-    # (no-op realign) and ops re-apply (idempotent at the scene level
-    # because the underlying setattr just rewrites the same value).
+    # Same packet again — receiver detects stale (seq=1 <= verified=1)
+    # and drops it. apply count stays at 1.
     uc.apply_raw(codec.encode(f1))
-    assert len(scene.applied) == 2  # apply count grows; LWW state stable
+    assert len(scene.applied) == 1
 
-    # New force at higher seq+ts applies as well.
+    # New force at higher seq+ts applies.
     f2 = sender.build(CategoryKind.MATERIAL, [{"mat": "B"}], 2.0, force=True)
     uc.apply_raw(codec.encode(f2))
-    assert len(scene.applied) == 3
+    assert len(scene.applied) == 2
 
 
 def test_force_push_after_normal_chain_does_not_break_chain():
@@ -298,14 +297,15 @@ def test_stale_force_resend_does_not_rewind_chain():
     state_after = uc._chains["alice"]
     assert state_after.expected_seq == expected_after
     assert state_after.last_verified_seq == 3
-    # Force payload re-applies (force is authoritative; idempotent at
-    # the scene level), so applied count grows but chain stays put.
-    assert len(scene.applied) == 3
+    # P1-12: stale force payload is also dropped — applying it would
+    # revert scene state to the older snapshot even though newer ops
+    # have already been accepted.
+    assert len(scene.applied) == 2
 
     # And a follow-up reliable packet at seq=4 still applies cleanly.
     rel4 = sender.build(CategoryKind.MATERIAL, [{"mat": "Next"}], 4.0)
     uc.apply_raw(codec.encode(rel4))
-    assert len(scene.applied) == 4
+    assert len(scene.applied) == 3
     # No NEW NACKs were emitted by the stale force or the follow-up;
     # only the original gap NACK from rel3 arriving early is present.
     assert nacks == nacks_baseline
@@ -339,6 +339,36 @@ def test_stale_force_does_not_resurrect_obsolete_held_back():
     # rel4 should still be held back (the stale force did not touch
     # the held_back map because of the early return).
     assert 4 in uc._chains["alice"].held_back
+
+
+def test_stale_force_does_not_revert_newer_state():
+    """P1-12: a stale force RESEND that arrives after newer reliable
+    traffic has already overwritten the same datablock must drop the
+    payload entirely. Otherwise the scene rolls back to the old
+    snapshot until another edit happens.
+    """
+    uc, scene, codec = _make_uc()
+    uc.set_nack_emitter(lambda a, f, l: None)
+
+    sender = PacketBuilder("alice", SeqCounter())
+    force1 = sender.build(CategoryKind.MATERIAL,
+                          [{"mat": "Mat", "value": "Snap"}], 1.0, force=True)
+    rel2 = sender.build(CategoryKind.MATERIAL,
+                        [{"mat": "Mat", "value": "After"}], 2.0)
+
+    # Apply force, then a fresher reliable update for the same Mat.
+    uc.apply_raw(codec.encode(force1))
+    uc.apply_raw(codec.encode(rel2))
+    assert len(scene.applied) == 2
+    last_value = scene.applied[-1][1][0]["value"]
+    assert last_value == "After"
+
+    # Stale force RESEND arrives. It must NOT re-apply "Snap" over
+    # the live "After" state.
+    uc.apply_raw(codec.encode(force1))
+    assert len(scene.applied) == 2  # nothing new applied
+    last_value = scene.applied[-1][1][0]["value"]
+    assert last_value == "After"
 
 
 def test_force_push_does_not_touch_lww_for_other_keys():
