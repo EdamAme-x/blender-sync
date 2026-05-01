@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import _id_props
 from .base import DirtyContext
 
 
@@ -73,6 +74,9 @@ class ArmatureCategoryHandler:
             "show_axes": bool(getattr(arm, "show_axes", False)),
             "show_names": bool(getattr(arm, "show_names", False)),
         }
+        ip = _id_props.serialize_id_props(arm)
+        if ip:
+            out["id_props"] = ip
 
         # Bone collections (top-level, Blender 4+).
         bcs = getattr(arm, "collections", None)
@@ -139,6 +143,7 @@ class ArmatureCategoryHandler:
                             pass
 
             self._apply_bones(bpy, arm, op.get("bones", []))
+            _id_props.apply_id_props(arm, op.get("id_props") or {})
 
     def _apply_bones(self, bpy, arm, bones_data: list[dict]) -> None:
         # Find an Object whose data is this armature, so we can switch

@@ -24,6 +24,7 @@ from .categories.particle import ParticleCategoryHandler
 from .categories.point_cloud import PointCloudCategoryHandler
 from .categories.sound import SoundCategoryHandler
 from .categories.texture import TextureCategoryHandler
+from .categories.view3d import View3DCategoryHandler
 from .categories.volume import VolumeCategoryHandler
 from .categories.vse_strip import VSEStripCategoryHandler
 from .categories.light import LightCategoryHandler
@@ -119,6 +120,7 @@ class BpySceneGateway(ISceneGateway):
             CategoryKind.LIGHT: LightCategoryHandler(),
             CategoryKind.ANIMATION: AnimationCategoryHandler(),
             CategoryKind.VSE_STRIP: VSEStripCategoryHandler(),
+            CategoryKind.VIEW3D: View3DCategoryHandler(),
             # Tier 4: maintenance ops — must run last so deletion/rename
             # don't trip up references in earlier tiers.
             CategoryKind.RENAME: RenameCategoryHandler(),
@@ -268,6 +270,8 @@ class BpySceneGateway(ISceneGateway):
             return bool(getattr(snap, "vse_strip", False))
         if category is CategoryKind.SOUND:
             return bool(getattr(snap, "sounds", frozenset()))
+        if category is CategoryKind.VIEW3D:
+            return bool(getattr(snap, "view3d", False))
         return False
 
     def apply_ops(self, category: CategoryKind, ops: list[dict[str, Any]]) -> None:
@@ -347,6 +351,8 @@ class BpySceneGateway(ISceneGateway):
                 except Exception:
                     pass
 
+        self._subscribe_view3d_msgbus(bpy)
+
     def _mark_all_sounds(self) -> None:
         try:
             import bpy
@@ -357,6 +363,35 @@ class BpySceneGateway(ISceneGateway):
             return
         for snd in sounds:
             self._tracker.mark_sound(snd.name)
+
+    # 3D-view shading flips (SOLID / MATERIAL / RENDERED, scene-lights
+    # toggle, etc.) flow through msgbus on the View3DShading struct.
+    # Without subscribing to it the receiver only learns of shading
+    # changes when something else triggers the dirty path.
+    def _subscribe_view3d_msgbus(self, bpy) -> None:
+        owner = self._msgbus_owner
+        shading_t = getattr(bpy.types, "View3DShading", None)
+        if shading_t is None:
+            return
+        for prop in (
+            "type", "light", "color_type",
+            "use_scene_lights", "use_scene_world",
+            "use_scene_lights_render", "use_scene_world_render",
+            "show_xray", "show_shadows", "show_cavity",
+        ):
+            try:
+                bpy.msgbus.subscribe_rna(
+                    key=(shading_t, prop),
+                    owner=owner, args=(),
+                    notify=self._notify_view3d,
+                )
+            except Exception:
+                pass
+
+    def _notify_view3d(self) -> None:
+        if self._applying_remote:
+            return
+        self._tracker.mark_view3d()
 
     def _make_depsgraph_handler(self):
         gateway = self

@@ -42,6 +42,7 @@ class CategoryKind(str, Enum):
     POINT_CLOUD = "point_cloud"
     VSE_STRIP = "vse_strip"
     SOUND = "sound"
+    VIEW3D = "view3d"
     SNAPSHOT = "snapshot"
     CONTROL = "control"
 
@@ -92,6 +93,8 @@ CATEGORY_TO_CHANNEL: dict[CategoryKind, ChannelKind] = {
     CategoryKind.POINT_CLOUD: ChannelKind.RELIABLE,
     CategoryKind.VSE_STRIP: ChannelKind.RELIABLE,
     CategoryKind.SOUND: ChannelKind.RELIABLE,
+    # Viewport shading is interactive UI state; lossiness is fine.
+    CategoryKind.VIEW3D: ChannelKind.FAST,
     CategoryKind.SNAPSHOT: ChannelKind.RELIABLE,
     CategoryKind.CONTROL: ChannelKind.RELIABLE,
 }
@@ -218,6 +221,7 @@ class SyncFilters:
     point_cloud: bool = True
     vse_strip: bool = True
     sound: bool = True
+    view3d: bool = True
 
     def enabled_categories(self) -> frozenset["CategoryKind"]:
         out: set[CategoryKind] = set()
@@ -252,6 +256,7 @@ class SyncFilters:
         if self.point_cloud: out.add(CategoryKind.POINT_CLOUD)
         if self.vse_strip: out.add(CategoryKind.VSE_STRIP)
         if self.sound: out.add(CategoryKind.SOUND)
+        if self.view3d: out.add(CategoryKind.VIEW3D)
         # Deletion + rename are always enabled — removing them would let
         # stale state accumulate on peers indefinitely.
         out.add(CategoryKind.DELETION)

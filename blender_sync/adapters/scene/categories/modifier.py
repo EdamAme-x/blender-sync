@@ -117,6 +117,35 @@ class ModifierCategoryHandler:
             "name": mod.name,
             "type": mod.type,
         }
+        # GeometryNodes modifier instance ID-props.
+        # Each socket on the bound NodeTree exposes:
+        #   mod["Input_<N>"]                    — current value
+        #   mod["Input_<N>_attribute_name"]     — attribute override
+        #   mod["Input_<N>_use_attribute"]      — bool toggle
+        # `dir(mod)` does not enumerate ID-props, so the previous walker
+        # missed them entirely and peers using Geometry Nodes saw all
+        # inputs reset to the tree defaults. Pull them via .keys().
+        if mod.type == "NODES":
+            id_props: dict[str, Any] = {}
+            try:
+                keys = list(mod.keys())
+            except Exception:
+                keys = []
+            for key in keys:
+                if not isinstance(key, str) or key.startswith("_"):
+                    continue
+                try:
+                    val = mod[key]
+                except Exception:
+                    continue
+                serialized = (
+                    val if isinstance(val, _PRIM) else _serialize_value(val)
+                )
+                if serialized is not None:
+                    id_props[key] = serialized
+            if id_props:
+                out["id_props"] = id_props
+
         props: dict[str, Any] = {}
         nested: dict[str, dict[str, Any]] = {}
         for attr in dir(mod):
@@ -249,6 +278,13 @@ class ModifierCategoryHandler:
                 if struct is None:
                     continue
                 self._apply_struct(struct, inner)
+
+            # GeometryNodes ID-props (Input_*, Input_*_attribute_name, ...).
+            for key, val in (entry.get("id_props") or {}).items():
+                try:
+                    new_mod[key] = val
+                except Exception:
+                    continue
 
     def _apply_struct(self, struct, inner: dict) -> None:
         deep = inner.get("__deep__")

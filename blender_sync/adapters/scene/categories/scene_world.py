@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _nodetree
+from . import _id_props, _nodetree
 
 
 class SceneWorldCategoryHandler:
@@ -97,6 +97,15 @@ class SceneWorldCategoryHandler:
                 _nodetree.serialize_link(l) for l in world.node_tree.links
             ]
 
+        # Custom properties on Scene and World — pipeline tools store
+        # everything from asset metadata to render-farm hints here.
+        scene_ip = _id_props.serialize_id_props(scene)
+        if scene_ip:
+            out["id_props"] = scene_ip
+        world_ip = _id_props.serialize_id_props(world)
+        if world_ip:
+            wd["id_props"] = world_ip
+
         out["world"] = wd
         return out
 
@@ -176,6 +185,9 @@ class SceneWorldCategoryHandler:
                         setattr(ms, k, v)
                     except Exception:
                         pass
+
+        _id_props.apply_id_props(scene, op.get("id_props") or {})
+        _id_props.apply_id_props(world, wd.get("id_props") or {})
 
     def build_full(self) -> list[dict[str, Any]]:
         return self.collect()
