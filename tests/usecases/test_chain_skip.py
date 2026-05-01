@@ -1,17 +1,24 @@
-"""Regression tests for the chain-skip wedge bug (codex P1-1).
+"""Regression tests for the chain-skip wedge bug (codex P1-1 + P1-8).
 
-The bug: PacketBuilder uses a single SeqCounter for *all* outgoing
-packets (reliable + fast + force). The receiver's `expected_seq` was
-only advanced for in-order *reliable* packets, so a burst of fast
-(transform / view3d / pose) packets between reliable packets caused
-the next reliable packet to look like a gap. NACK was then emitted
-for seqs that the sender's reliable history doesn't contain (chain==0
-or force=True), which produces a permanent stall — wedge.
+P1-1: a burst of fast / force packets used to wedge the receiver
+because they shared the seq counter with reliable packets.
 
-Fix in apply_remote.py: when we see a chain==0 or force packet whose
-seq is >= our expected_seq, advance expected_seq past it. The chain
-itself (last_verified_seq, rolling A/B) is intentionally NOT touched —
-those skipped packets aren't part of the verified chain.
+P1-1's first fix advanced `expected_seq` past skipped packets, which
+P1-8 then proved buggy in the reverse direction: a delayed reliable
+packet could arrive after a fast packet had already pulled
+`expected_seq` past it, and would be silently held back forever.
+
+The proper fix (P1-8): PacketBuilder maintains two independent seq
+counters — one for reliable+chain-verified packets, one for fast /
+unreliable packets. Receiver only ever tracks the reliable counter.
+chain==0 (fast) packets are accepted unconditionally and don't touch
+expected_seq. force=True packets stay on the reliable chain (they
+come on the reliable channel) so NACK/RESEND keeps working past a
+Force Push.
+
+These tests verify both directions: a burst of fast packets does not
+cause a wedge, and a delayed reliable packet that arrives after a
+fast packet still applies.
 """
 from __future__ import annotations
 
@@ -58,13 +65,17 @@ def _packet_body_for_chain(packet: Packet) -> bytes:
 
 def _build_reliable(seq: int, ts: float, ops, chain: PacketChain,
                     category=CategoryKind.MATERIAL,
-                    author: str = "alice") -> Packet:
+                    author: str = "alice",
+                    force: bool = False) -> Packet:
     """Build a reliable packet whose chain field is correctly computed
     against the supplied PacketChain. Mutates `chain` to advance it,
-    matching what PacketBuilder does on the sender side."""
+    matching what PacketBuilder does on the sender side.
+
+    Pass `force=True` to compute the chain over the force-flag wire
+    representation so receiver chain verification matches."""
     skel = Packet(
         version=1, seq=seq, ts=ts, author=author,
-        category=category, ops=tuple(ops),
+        category=category, ops=tuple(ops), force=force,
     )
     body = _packet_body_for_chain(skel)
     a, b = chain.advance(body)
@@ -72,6 +83,7 @@ def _build_reliable(seq: int, ts: float, ops, chain: PacketChain,
     return Packet(
         version=1, seq=seq, ts=ts, author=author,
         category=category, ops=tuple(ops),
+        force=force,
         chain=val, digit=val % 10,
     )
 
@@ -85,60 +97,59 @@ def _build_fast(seq: int, ts: float, ops, author: str = "alice") -> Packet:
     )
 
 
-def _build_force(seq: int, ts: float, ops, author: str = "alice",
+def _build_force(seq: int, ts: float, ops, chain: PacketChain,
+                 author: str = "alice",
                  category=CategoryKind.MATERIAL) -> Packet:
-    """Build a force packet — chain stays 0, force=True."""
-    return Packet(
-        version=1, seq=seq, ts=ts, author=author,
-        category=category, ops=tuple(ops),
-        force=True,
-    )
+    """Build a force packet — rides the reliable chain (P1-8 fix)."""
+    return _build_reliable(seq, ts, ops, chain,
+                           category=category, author=author, force=True)
 
 
 # ----------------------------------------------------------------------
 # Wedge regression: fast packets between reliable packets
 # ----------------------------------------------------------------------
 
-def test_fast_packets_advance_expected_seq_for_next_reliable():
-    """Sender sends seq=1 fast, seq=2 fast, seq=3 reliable. Receiver
-    must accept all three without NACK."""
+def test_fast_packets_then_reliable_apply_without_wedge():
+    """Reliable seq=1 follows two fast packets. Receiver must accept
+    all three, fast packets don't touch expected_seq."""
     uc, scene, codec, _ = _make_uc()
     chain = PacketChain()
 
     nacks: list = []
     uc.set_nack_emitter(lambda author, first, last: nacks.append((author, first, last)))
 
-    fast1 = _build_fast(1, 1.0, [{"n": "Cube", "loc": [0, 0, 0]}])
-    fast2 = _build_fast(2, 2.0, [{"n": "Cube", "loc": [1, 0, 0]}])
-    # The sender's chain is unaffected by fast packets, so seq=3
-    # reliable starts the chain at fresh A=1 B=0.
-    rel3 = _build_reliable(3, 3.0,
-                            [{"mat": "Material", "use_nodes": True}], chain)
+    # Fast packets ride a separate seq counter; their seqs (1, 2) live
+    # in a different namespace from reliable seq.
+    fast_a = _build_fast(1, 1.0, [{"n": "Cube", "loc": [0, 0, 0]}])
+    fast_b = _build_fast(2, 2.0, [{"n": "Cube", "loc": [1, 0, 0]}])
+    # Reliable counter starts at 1.
+    rel1 = _build_reliable(1, 3.0,
+                           [{"mat": "Material", "use_nodes": True}], chain)
 
-    uc.apply_raw(codec.encode(fast1))
-    uc.apply_raw(codec.encode(fast2))
-    uc.apply_raw(codec.encode(rel3))
+    uc.apply_raw(codec.encode(fast_a))
+    uc.apply_raw(codec.encode(fast_b))
+    uc.apply_raw(codec.encode(rel1))
 
-    # Three packets applied (2 fast transforms + 1 reliable material).
     assert len(scene.applied) == 3
     cats = [c for c, _ in scene.applied]
-    assert cats[0] is CategoryKind.TRANSFORM
-    assert cats[1] is CategoryKind.TRANSFORM
-    assert cats[2] is CategoryKind.MATERIAL
-    # No NACK — pre-fix this would emit one for seqs 1..2.
+    assert cats == [CategoryKind.TRANSFORM, CategoryKind.TRANSFORM,
+                    CategoryKind.MATERIAL]
     assert nacks == []
 
 
-def test_force_packet_advances_expected_seq():
-    """Force-push (chain=0, force=True) consumes seq. Subsequent reliable
-    packet must not be misidentified as a gap."""
+def test_force_packet_remains_on_reliable_chain():
+    """Force packet rides the reliable seq+chain. Receiver applies it
+    normally and the next reliable packet is NOT a gap."""
     uc, scene, codec, _ = _make_uc()
     chain = PacketChain()
 
     nacks: list = []
     uc.set_nack_emitter(lambda a, f, l: nacks.append((a, f, l)))
 
-    force1 = _build_force(1, 1.0, [{"mat": "Mat", "use_nodes": True}])
+    # Force packets carry a real chain because they ride the reliable
+    # channel.
+    force1 = _build_force(1, 1.0,
+                          [{"mat": "Mat", "use_nodes": True}], chain)
     rel2 = _build_reliable(2, 2.0,
                            [{"mat": "Mat2", "use_nodes": True}], chain)
 
@@ -150,8 +161,7 @@ def test_force_packet_advances_expected_seq():
 
 
 def test_long_fast_burst_does_not_wedge():
-    """100 fast packets followed by 1 reliable packet — the previous
-    bug would NACK seqs 1..100 and stall."""
+    """100 fast packets followed by reliable seq=1: must apply, no NACK."""
     uc, scene, codec, _ = _make_uc()
     chain = PacketChain()
     nacks: list = []
@@ -160,7 +170,7 @@ def test_long_fast_burst_does_not_wedge():
     for i in range(1, 101):
         fast = _build_fast(i, float(i), [{"n": "Cube"}])
         uc.apply_raw(codec.encode(fast))
-    rel = _build_reliable(101, 101.0,
+    rel = _build_reliable(1, 101.0,
                           [{"mat": "M", "use_nodes": True}], chain)
     uc.apply_raw(codec.encode(rel))
 
@@ -168,28 +178,45 @@ def test_long_fast_burst_does_not_wedge():
     assert nacks == []
 
 
-def test_held_back_reliable_drains_after_fast_skip():
-    """Out-of-order arrival: reliable seq=3 arrives before reliable
-    seq=2, with a fast seq=1 in between. After the fast skip + reliable
-    seq=2 arrives, both should be applied without NACK."""
+def test_late_reliable_after_fast_still_applies():
+    """The exact P1-8 regression: reliable seq=1 arrives AFTER fast
+    seq=1 (independent counter, but pre-P1-8 the shared counter would
+    have made the receiver drop it). Reliable must still apply."""
     uc, scene, codec, _ = _make_uc()
     chain = PacketChain()
     nacks: list = []
     uc.set_nack_emitter(lambda a, f, l: nacks.append((a, f, l)))
 
     fast1 = _build_fast(1, 1.0, [{"n": "Cube"}])
-    rel2 = _build_reliable(2, 2.0,
+    rel1 = _build_reliable(1, 2.0,
+                           [{"mat": "M", "use_nodes": True}], chain)
+
+    uc.apply_raw(codec.encode(fast1))
+    uc.apply_raw(codec.encode(rel1))
+
+    assert len(scene.applied) == 2
+    assert nacks == []
+
+
+def test_held_back_reliable_drains_after_fast_skip():
+    """Out-of-order reliable arrival with a fast in between."""
+    uc, scene, codec, _ = _make_uc()
+    chain = PacketChain()
+    nacks: list = []
+    uc.set_nack_emitter(lambda a, f, l: nacks.append((a, f, l)))
+
+    fast_a = _build_fast(1, 1.0, [{"n": "Cube"}])
+    rel1 = _build_reliable(1, 2.0,
                            [{"mat": "A", "use_nodes": True}], chain)
-    rel3 = _build_reliable(3, 3.0,
+    rel2 = _build_reliable(2, 3.0,
                            [{"mat": "B", "use_nodes": True}], chain)
 
-    # Order: fast1, then rel3 first (out of order), then rel2.
-    uc.apply_raw(codec.encode(fast1))
-    uc.apply_raw(codec.encode(rel3))   # held back, NACK 2..2 expected
-    assert nacks == [("alice", 2, 2)]
-    assert len(scene.applied) == 1   # only fast1 so far
+    uc.apply_raw(codec.encode(fast_a))
+    uc.apply_raw(codec.encode(rel2))   # held back, NACK 1..1
+    assert nacks == [("alice", 1, 1)]
+    assert len(scene.applied) == 1   # only fast so far
 
-    uc.apply_raw(codec.encode(rel2))  # in-order; drains rel3 too
+    uc.apply_raw(codec.encode(rel1))
     assert len(scene.applied) == 3
     cats = [c for c, _ in scene.applied]
     assert cats == [CategoryKind.TRANSFORM,
@@ -198,10 +225,8 @@ def test_held_back_reliable_drains_after_fast_skip():
 
 
 def test_chain_continuity_preserved_across_fast_skip():
-    """The reliable chain must remain contiguous on the receiver side
-    after fast packets in between. Sender's chain advances only on
-    reliable packets, so receiver's chain after seq=4 reliable should
-    match the sender's seq=4 reliable chain value."""
+    """Sender chain advances only on reliable. Receiver chain stays
+    contiguous on reliable seq=2 even with fast packets in between."""
     uc, scene, codec, _ = _make_uc()
     sender_chain = PacketChain()
     nacks: list = []
@@ -209,69 +234,58 @@ def test_chain_continuity_preserved_across_fast_skip():
 
     rel1 = _build_reliable(1, 1.0,
                            [{"mat": "A", "use_nodes": True}], sender_chain)
-    fast2 = _build_fast(2, 2.0, [{"n": "Cube"}])
-    fast3 = _build_fast(3, 3.0, [{"n": "Cube"}])
-    rel4 = _build_reliable(4, 4.0,
+    fast_a = _build_fast(1, 2.0, [{"n": "Cube"}])
+    fast_b = _build_fast(2, 3.0, [{"n": "Cube"}])
+    rel2 = _build_reliable(2, 4.0,
                            [{"mat": "B", "use_nodes": True}], sender_chain)
 
     uc.apply_raw(codec.encode(rel1))
-    uc.apply_raw(codec.encode(fast2))
-    uc.apply_raw(codec.encode(fast3))
-    uc.apply_raw(codec.encode(rel4))
+    uc.apply_raw(codec.encode(fast_a))
+    uc.apply_raw(codec.encode(fast_b))
+    uc.apply_raw(codec.encode(rel2))
 
     assert len(scene.applied) == 4
     assert nacks == []
 
 
-def test_duplicate_after_fast_skip_is_still_dropped():
-    """A retransmit / duplicate of an already-verified reliable packet
-    must still be discarded after fast packets advanced expected_seq."""
+def test_duplicate_after_fast_is_still_dropped():
+    """A retransmit / duplicate reliable seq must still be discarded."""
     uc, scene, codec, _ = _make_uc()
     sender_chain = PacketChain()
 
     rel1 = _build_reliable(1, 1.0,
                            [{"mat": "A", "use_nodes": True}], sender_chain)
     uc.apply_raw(codec.encode(rel1))
-    fast2 = _build_fast(2, 2.0, [{"n": "Cube"}])
-    uc.apply_raw(codec.encode(fast2))
+    fast_a = _build_fast(1, 2.0, [{"n": "Cube"}])
+    uc.apply_raw(codec.encode(fast_a))
 
-    # Re-deliver the same rel1 packet (e.g. because of NACK echo).
     uc.apply_raw(codec.encode(rel1))
-    # Should not double-apply.
-    assert len(scene.applied) == 2  # rel1, fast2 only.
+    assert len(scene.applied) == 2  # rel1, fast — not 3.
 
 
-def test_force_packet_does_not_break_subsequent_chain_verification():
-    """After a Force Push (force=True, chain=0) sender's reliable chain
-    might also be reset (Force Pull resets receiver's chain explicitly).
-    Here we only test that a follow-up reliable packet is not NACKed
-    spuriously."""
-    uc, scene, codec, _ = _make_uc()
-    sender_chain = PacketChain()
-    nacks: list = []
-    uc.set_nack_emitter(lambda a, f, l: nacks.append((a, f, l)))
-
-    force1 = _build_force(1, 1.0, [{"mat": "A", "use_nodes": True}])
-    rel2 = _build_reliable(2, 2.0,
-                           [{"mat": "B", "use_nodes": True}], sender_chain)
-    uc.apply_raw(codec.encode(force1))
-    uc.apply_raw(codec.encode(rel2))
-
-    assert len(scene.applied) == 2
-    assert nacks == []
-
-
-def test_chain_skip_does_not_advance_last_verified_seq():
-    """`last_verified_seq` (used by `is_duplicate`) tracks reliable-only
-    progress. A fast packet must not bump it, otherwise a delayed
-    reliable packet at that seq would be wrongly flagged as duplicate."""
+def test_fast_packet_does_not_advance_expected_seq():
+    """The core P1-8 invariant: chain==0 packets must not touch
+    expected_seq. The receiver doesn't even instantiate per-author
+    chain state for them — fast packets are accepted unconditionally
+    and never interact with reliable seq tracking."""
     uc, scene, codec, _ = _make_uc()
     fast1 = _build_fast(1, 1.0, [{"n": "Cube"}])
+    fast2 = _build_fast(2, 2.0, [{"n": "Cube"}])
     uc.apply_raw(codec.encode(fast1))
+    uc.apply_raw(codec.encode(fast2))
 
+    # No per-author chain state required for fast-only authors.
+    assert "alice" not in uc._chains
+    # Both fast packets applied.
+    assert len(scene.applied) == 2
+
+    # Once a real reliable packet arrives, the chain state should
+    # initialize at expected_seq=1 — i.e., the fast packets did not
+    # secretly bump the reliable counter.
+    chain = PacketChain()
+    rel1 = _build_reliable(1, 3.0,
+                           [{"mat": "M", "use_nodes": True}], chain)
+    uc.apply_raw(codec.encode(rel1))
     state = uc._chains["alice"]
-    # expected_seq advanced past the fast packet.
+    assert state.last_verified_seq == 1
     assert state.expected_seq == 2
-    # But last_verified_seq stayed at the initial value (0). Otherwise
-    # a duplicate-check on seq=1 reliable would incorrectly succeed.
-    assert state.last_verified_seq == 0

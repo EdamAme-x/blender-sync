@@ -32,14 +32,41 @@ def _packet_body_for_chain(packet_dict: dict[str, Any]) -> bytes:
 class PacketBuilder:
     """Constructs Packets and maintains the per-peer outgoing chain.
 
-    The chain only advances for RELIABLE packets — fast/transform packets
-    are unordered + lossy by design and excluded from the verification
-    protocol.
+    Reliable (chain-verified) and unreliable (fast / FAST channel)
+    packets use **separate seq counters** so the two streams never
+    interleave on the wire. The chain advances for every RELIABLE
+    packet — including force packets, which carry full state on the
+    reliable channel and remain part of the chain so that a Force
+    Push doesn't silently break NACK/RESEND on subsequent reliable
+    packets.
+
+    Why two counters?
+    -----------------
+    A single shared counter means a fast packet that overtakes a slow
+    reliable packet on the wire can confuse the receiver: either the
+    receiver advances `expected_seq` past the fast seq (and then the
+    delayed reliable packet has `seq < expected_seq` and is dropped),
+    or it doesn't (and the next reliable packet looks like a gap and
+    NACKs a seq that has chain==0 and isn't in the sender's reliable
+    history). Splitting reliable vs. fast seq spaces removes the
+    crossing entirely.
     """
 
-    def __init__(self, peer_id: str, seq: SeqCounter, version: int = 1) -> None:
+    def __init__(
+        self,
+        peer_id: str,
+        seq: SeqCounter,
+        version: int = 1,
+        unreliable_seq: SeqCounter | None = None,
+    ) -> None:
         self._peer_id = peer_id
+        # Reliable, chain-verified seq. Receivers track this as
+        # `expected_seq`.
         self._seq = seq
+        # Independent counter for fast/force packets. The receiver does
+        # not gap-check this — it's purely an identifier for echo / dup
+        # detection on the lossy path.
+        self._unreliable_seq = unreliable_seq if unreliable_seq is not None else SeqCounter()
         self._version = version
         self._chain = PacketChain()
 
@@ -54,7 +81,17 @@ class PacketBuilder:
         ts: float,
         force: bool = False,
     ) -> Packet:
-        seq = self._seq.next()
+        on_reliable_chain = (
+            CATEGORY_TO_CHANNEL[category] is ChannelKind.RELIABLE
+        )
+        if on_reliable_chain:
+            seq = self._seq.next()
+        else:
+            # Fast / unreliable packet: separate seq space, chain
+            # skipped. Force packets stay on the reliable chain so that
+            # NACK/RESEND continues working past a force push.
+            seq = self._unreliable_seq.next()
+
         skeleton = Packet(
             version=self._version,
             seq=seq,
@@ -64,7 +101,7 @@ class PacketBuilder:
             ops=tuple(ops),
             force=force,
         )
-        if CATEGORY_TO_CHANNEL[category] is not ChannelKind.RELIABLE:
+        if not on_reliable_chain:
             return skeleton
         body = _packet_body_for_chain(skeleton.to_wire_dict())
         a, b = self._chain.advance(body)
