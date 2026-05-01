@@ -11,6 +11,9 @@ class FakeSceneGateway:
         self.snapshot: list[tuple[CategoryKind, list[dict[str, Any]]]] = []
         self.snapshot_initial_flags: list[bool] = []
         self.installed = False
+        # Set by tests that want to exercise the undo path.
+        self.undo_pending_force = False
+        self.undo_force_consumed: int = 0
 
     def is_applying_remote(self) -> bool:
         return self.applying_remote
@@ -23,6 +26,13 @@ class FakeSceneGateway:
 
     def uninstall_change_listeners(self) -> None:
         self.installed = False
+
+    def consume_undo_pending_force(self) -> bool:
+        if not self.undo_pending_force:
+            return False
+        self.undo_pending_force = False
+        self.undo_force_consumed += 1
+        return True
 
     def collect_dirty_ops(
         self, categories: Iterable[CategoryKind]

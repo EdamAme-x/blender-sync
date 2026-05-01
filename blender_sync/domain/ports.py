@@ -56,6 +56,12 @@ class ISceneDirtyCollector(Protocol):
     def collect_dirty_ops(
         self, categories: Iterable[CategoryKind]
     ) -> list[tuple[CategoryKind, list[dict[str, Any]]]]: ...
+    def consume_undo_pending_force(self) -> bool:
+        """Returns True iff the user just performed an Undo or Redo
+        and the next outgoing tick should broadcast as force=True so
+        peers don't reject the rewound state via LWW. Resets the flag
+        on read."""
+        ...
 
 
 @runtime_checkable

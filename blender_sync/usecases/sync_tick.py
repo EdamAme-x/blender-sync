@@ -54,11 +54,26 @@ class SyncTickUseCase:
         if not grouped:
             return
 
+        # If the local user just pressed Ctrl+Z / Ctrl+Shift+Z, the
+        # gateway raised an undo flag and pre-marked every category
+        # dirty. Build this batch as force=True so peers accept the
+        # rewound state instead of rejecting it via LWW (their last
+        # seen ts is newer than the post-undo state).
+        force_this_tick = False
+        try:
+            force_this_tick = bool(self._scene.consume_undo_pending_force())
+        except Exception as exc:
+            self._logger.debug(
+                "consume_undo_pending_force unavailable: %s", exc,
+            )
+
         ts = self._clock.now()
         for category, ops in grouped:
             if not ops:
                 continue
-            packet = self._builder.build(category, ops, ts)
+            packet = self._builder.build(
+                category, ops, ts, force=force_this_tick,
+            )
             try:
                 data = self._codec.encode(packet)
             except Exception as exc:
@@ -68,6 +83,11 @@ class SyncTickUseCase:
                 self._history.record(packet)
             self._async_runner.run_coroutine(
                 self._transport.send(packet.channel, data)
+            )
+        if force_this_tick:
+            self._logger.info(
+                "broadcasted post-undo state as %d force packets",
+                len(grouped),
             )
 
     def _enabled_categories(self) -> list[CategoryKind]:

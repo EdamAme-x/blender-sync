@@ -131,6 +131,7 @@ class BpySceneGateway(ISceneGateway):
         }
 
         self._depsgraph_handler = self._make_depsgraph_handler()
+        self._undo_handler = self._make_undo_handler()
         self._mode_state: dict[str, str] = {}
         self._msgbus_owner = object()
         self._prev_visibility: dict[str, tuple[bool, bool, bool]] = {}
@@ -140,6 +141,13 @@ class BpySceneGateway(ISceneGateway):
         self._action_to_users: dict[str, set[tuple[str, str]]] = {}
         self._cleanup_counter = 0
         self._cleanup_interval = 600
+        # Set when the user pressed Ctrl+Z / Ctrl+Shift+Z. SyncTick reads
+        # this flag, builds a force packet covering all dirty categories,
+        # and clears it. Reason: Blender's undo restores arbitrary
+        # bpy.data state — diffing against last-sent state is unreliable
+        # and slow, so we just authoritatively re-broadcast the new
+        # local state.
+        self._undo_pending_force = False
 
     # --- Domain port ---------------------------------------------------
 
@@ -158,6 +166,17 @@ class BpySceneGateway(ISceneGateway):
             return
         try:
             bpy.app.handlers.depsgraph_update_post.append(self._depsgraph_handler)
+            # Undo / Redo: when the user presses Ctrl+Z the bpy.data
+            # state is rewound. Without this hook the local Blender
+            # would diverge from peers (peers still hold the
+            # post-edit state). The handler marks every category
+            # dirty + flips the force flag so SyncTick re-broadcasts
+            # the rewound state authoritatively.
+            for hook in (
+                bpy.app.handlers.undo_post,
+                bpy.app.handlers.redo_post,
+            ):
+                hook.append(self._undo_handler)
             self._subscribe_msgbus(bpy)
             self._installed = True
             self._logger.info("scene listeners installed")
@@ -174,6 +193,12 @@ class BpySceneGateway(ISceneGateway):
         try:
             if self._depsgraph_handler in bpy.app.handlers.depsgraph_update_post:
                 bpy.app.handlers.depsgraph_update_post.remove(self._depsgraph_handler)
+            for hook in (
+                bpy.app.handlers.undo_post,
+                bpy.app.handlers.redo_post,
+            ):
+                if self._undo_handler in hook:
+                    hook.remove(self._undo_handler)
             try:
                 bpy.msgbus.clear_by_owner(self._msgbus_owner)
             except Exception:
@@ -402,6 +427,122 @@ class BpySceneGateway(ISceneGateway):
         if self._applying_remote:
             return
         self._tracker.mark_view3d()
+
+    def consume_undo_pending_force(self) -> bool:
+        """Returns True if an undo/redo just happened and the next sync
+        tick should broadcast as force=True. Resets the flag — caller
+        should arrange for the rebroadcast immediately."""
+        if not self._undo_pending_force:
+            return False
+        self._undo_pending_force = False
+        return True
+
+    def _make_undo_handler(self):
+        gateway = self
+
+        def _handler(scene, depsgraph=None):
+            # Don't echo our own apply path: if we're applying a remote
+            # packet right now, the rewind is the legitimate result of
+            # the remote's authoritative state, not a local user undo.
+            if gateway._applying_remote:
+                return
+            try:
+                import bpy
+            except ImportError:
+                return
+            # Mark every datablock as dirty so the next collect emits
+            # the post-undo state for every category. Force flag tells
+            # SyncTickUseCase to send these as force=True packets so
+            # peers don't reject them via LWW.
+            try:
+                gateway._mark_all_dirty(bpy)
+                gateway._undo_pending_force = True
+                gateway._logger.info(
+                    "undo/redo detected: scheduling force rebroadcast",
+                )
+            except Exception as exc:
+                gateway._logger.warning("undo handler failed: %s", exc)
+
+        return _handler
+
+    def _mark_all_dirty(self, bpy) -> None:
+        """Walk every tracked bpy.data collection and mark its members
+        dirty. Used by the undo handler — the trade-off for completeness
+        over a per-datablock diff is acceptable because undo is rare
+        and per-datablock diffs would need a snapshot of pre-undo
+        state."""
+        t = self._tracker
+        # Object-level tracker fields.
+        for o in bpy.data.objects:
+            t.mark_transform(o.name)
+            t.mark_visibility(o.name)
+            if hasattr(o, "modifiers") and len(o.modifiers) > 0:
+                t.mark_modifier(o.name, "")
+            if o.type == "ARMATURE":
+                t.mark_pose(o.name)
+            if hasattr(o, "particle_systems") and o.particle_systems:
+                t.mark_particle(o.name)
+            data = getattr(o, "data", None)
+            if data is not None and getattr(data, "shape_keys", None):
+                t.mark_shape_keys(o.name)
+        # Datablock-level collections.
+        for name_attr, mark in (
+            ("materials", t.mark_material),
+            ("meshes", t.mark_mesh_committed),
+            ("cameras", t.mark_camera),
+            ("lights", t.mark_light),
+            ("collections", t.mark_collection),
+            ("images", t.mark_image),
+            ("armatures", t.mark_armature),
+            ("node_groups", t.mark_node_group),
+            ("textures", t.mark_texture),
+            ("curves", t.mark_curve),
+            ("lattices", t.mark_lattice),
+            ("metaballs", t.mark_metaball),
+            ("sounds", t.mark_sound),
+        ):
+            coll = getattr(bpy.data, name_attr, None)
+            if coll is None:
+                continue
+            for db in coll:
+                try:
+                    mark(db.name)
+                except Exception:
+                    pass
+        # Newer 4.x / 5.x ID types — gated since some Blender builds
+        # don't expose them.
+        for name_attr, mark in (
+            ("volumes", t.mark_volume),
+            ("pointclouds", t.mark_point_cloud),
+        ):
+            coll = getattr(bpy.data, name_attr, None)
+            if coll is None:
+                continue
+            for db in coll:
+                try:
+                    mark(db.name)
+                except Exception:
+                    pass
+        # Grease Pencil v3 vs legacy.
+        for name_attr in ("grease_pencils_v3", "grease_pencils"):
+            coll = getattr(bpy.data, name_attr, None)
+            if coll is None:
+                continue
+            for db in coll:
+                try:
+                    t.mark_grease_pencil(db.name)
+                except Exception:
+                    pass
+        # Singletons.
+        t.mark_render()
+        t.mark_compositor()
+        t.mark_scene_world()
+        t.mark_view3d()
+        t.mark_vse_strip()
+        # Animation owners — fanned out from existing reverse lookup.
+        for action_name, users in self._action_to_users.items():
+            for kind, owner in users:
+                t.mark_animation(f"{kind}:{owner}")
 
     def _make_depsgraph_handler(self):
         gateway = self
