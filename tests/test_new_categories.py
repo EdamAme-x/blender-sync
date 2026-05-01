@@ -222,8 +222,10 @@ class _FakeSceneMap:
 
 
 class _FakeVSEScene:
-    def __init__(self, name: str):
+    def __init__(self, name: str, collection=None, strips_all=None):
         self.name = name
+        self._collection = collection
+        self._strips_all = list(strips_all or [])
         self.sequence_editor = None
         self.clear_count = 0
         self.create_count = 0
@@ -234,13 +236,44 @@ class _FakeVSEScene:
 
     def sequence_editor_create(self):
         self.create_count += 1
+        collection = self._collection if self._collection is not None else []
         self.sequence_editor = SimpleNamespace(
             show_overlay_frame=False,
-            strips=[],
+            strips=collection,
             sequences=[],
-            strips_all=[],
-            sequences_all=[],
+            strips_all=self._strips_all,
+            sequences_all=self._strips_all,
         )
+
+
+class _FakeVSECreatedStrip:
+    def __init__(self, name: str, stype: str):
+        self.name = name
+        self.type = stype
+        self.channel = 0
+        self.frame_start = 0
+        self.transform = None
+
+
+class _FakeVSECollection:
+    def __init__(self):
+        self.calls = []
+        self.created = []
+
+    def _make(self, method: str, name: str, stype: str, *args):
+        strip = _FakeVSECreatedStrip(name, stype)
+        self.calls.append((method, name, *args))
+        self.created.append(strip)
+        return strip
+
+    def new_meta(self, name, channel, frame_start):
+        return self._make("new_meta", name, "META", channel, frame_start)
+
+    def new_clip(self, name, clip, channel, frame_start):
+        return self._make("new_clip", name, "MOVIECLIP", clip, channel, frame_start)
+
+    def new_mask(self, name, mask, channel, frame_start):
+        return self._make("new_mask", name, "MASK", mask, channel, frame_start)
 
 
 def _install_fake_vse_bpy(monkeypatch, scenes, active_scene):
@@ -688,6 +721,115 @@ def test_vse_apply_without_scene_key_uses_context_fallback(monkeypatch):
     assert active.clear_count == 1
 
 
+def test_vse_serialize_movieclip_and_mask_refs(monkeypatch):
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+
+    class FakeStrip:
+        def __init__(self, stype: str, attr: str, target):
+            self.name = f"{stype}_Strip"
+            self.type = stype
+            self.channel = 2
+            self.frame_start = 11
+            self.frame_final_duration = 23
+            self.transform = None
+            setattr(self, attr, target)
+
+    clip = SimpleNamespace(name="ClipData")
+    mask = SimpleNamespace(name="MaskData")
+
+    def fake_ref(value):
+        return f"ref:{value.name}"
+
+    monkeypatch.setattr(vsm._datablock_ref, "try_ref", fake_ref)
+
+    h = vsm.VSEStripCategoryHandler()
+    clip_out = h._serialize_strip(FakeStrip("MOVIECLIP", "clip", clip))
+    mask_out = h._serialize_strip(FakeStrip("MASK", "mask", mask))
+
+    assert clip_out["clip_ref"] == "ref:ClipData"
+    assert clip_out["length"] == 23
+    assert mask_out["mask_ref"] == "ref:MaskData"
+    assert mask_out["length"] == 23
+
+
+def test_vse_apply_recreates_meta_movieclip_and_mask(monkeypatch):
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+
+    clip = SimpleNamespace(name="ClipData")
+    mask = SimpleNamespace(name="MaskData")
+    refs = {"clip-token": clip, "mask-token": mask}
+    monkeypatch.setattr(vsm._datablock_ref, "resolve_ref", refs.get)
+
+    coll = _FakeVSECollection()
+    scene = _FakeVSEScene("Scene", collection=coll)
+    h = vsm.VSEStripCategoryHandler()
+
+    h._apply_scene(None, scene, {
+        "active": True,
+        "strips": [
+            {"type": "META", "name": "Meta", "channel": 1, "frame_start": 3},
+            {
+                "type": "MOVIECLIP",
+                "name": "ClipStrip",
+                "channel": 2,
+                "frame_start": 4,
+                "clip_ref": "clip-token",
+            },
+            {
+                "type": "MASK",
+                "name": "MaskStrip",
+                "channel": 3,
+                "frame_start": 5,
+                "mask_ref": "mask-token",
+            },
+        ],
+    })
+
+    assert scene.clear_count == 1
+    assert scene.create_count == 1
+    assert coll.calls == [
+        ("new_meta", "Meta", 1, 3),
+        ("new_clip", "ClipStrip", clip, 2, 4),
+        ("new_mask", "MaskStrip", mask, 3, 5),
+    ]
+
+
+def test_vse_apply_skips_unresolved_movieclip_and_mask(monkeypatch):
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+    from tests.fakes.logger import RecordingLogger
+
+    monkeypatch.setattr(vsm._datablock_ref, "resolve_ref", lambda token: None)
+    coll = _FakeVSECollection()
+    scene = _FakeVSEScene("Scene", collection=coll)
+    logger = RecordingLogger()
+    h = vsm.VSEStripCategoryHandler(logger=logger)
+
+    h._apply_scene(None, scene, {
+        "active": True,
+        "strips": [
+            {
+                "type": "MOVIECLIP",
+                "name": "MissingClip",
+                "channel": 1,
+                "frame_start": 1,
+                "clip_ref": "missing-clip",
+            },
+            {
+                "type": "MASK",
+                "name": "MissingMask",
+                "channel": 2,
+                "frame_start": 1,
+                "mask_ref": "missing-mask",
+            },
+        ],
+    })
+
+    assert coll.calls == []
+    warnings = [text for level, text in logger.records if level == "WARN"]
+    assert any("MOVIECLIP" in text and "MissingClip" in text for text in warnings)
+    assert any("MASK" in text and "MissingMask" in text for text in warnings)
+
+
 def test_vse_effect_constants_match_blender_5():
     """`new_effect` enum in Blender 5 dropped TRANSFORM and OVER_DROP.
     The handler's effect-type sets must reflect that — sending an
@@ -903,6 +1045,8 @@ def test_vse_apply_blacklist_rejects_input_keys():
     assert "input_1" in blacklist
     assert "input_2" in blacklist
     assert "length" in blacklist
+    assert "clip_ref" in blacklist
+    assert "mask_ref" in blacklist
     assert "transform" in blacklist  # handled via dedicated branch
 
 

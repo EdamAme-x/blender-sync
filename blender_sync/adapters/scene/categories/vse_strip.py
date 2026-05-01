@@ -264,6 +264,14 @@ class VSEStripCategoryHandler:
             ref = _datablock_ref.try_ref(s.scene)
             if ref is not None:
                 out["scene_ref"] = ref
+        if stype == "MOVIECLIP" and getattr(s, "clip", None) is not None:
+            ref = _datablock_ref.try_ref(s.clip)
+            if ref is not None:
+                out["clip_ref"] = ref
+        if stype == "MASK" and getattr(s, "mask", None) is not None:
+            ref = _datablock_ref.try_ref(s.mask)
+            if ref is not None:
+                out["mask_ref"] = ref
         if hasattr(s, "scene_camera") and getattr(s, "scene_camera", None) is not None:
             ref = _datablock_ref.try_ref(s.scene_camera)
             if ref is not None:
@@ -410,6 +418,11 @@ class VSEStripCategoryHandler:
                     return None
                 return coll.new_image(name=name, filepath=fp,
                                       channel=ch, frame_start=fs)
+            if stype == "META":
+                # TODO: Rebuild child strips inside the meta once the wire
+                # format carries nested timelines. For now, preserve the
+                # meta shell instead of silently dropping it.
+                return coll.new_meta(name=name, channel=ch, frame_start=fs)
             if stype == "SCENE":
                 token = sd.get("scene_ref")
                 target_scene = (
@@ -419,6 +432,28 @@ class VSEStripCategoryHandler:
                     return None
                 return coll.new_scene(name=name, scene=target_scene,
                                       channel=ch, frame_start=fs)
+            if stype == "MOVIECLIP":
+                token = sd.get("clip_ref")
+                clip = _datablock_ref.resolve_ref(token) if token else None
+                if clip is None:
+                    self._warn(
+                        "vse apply skipped MOVIECLIP %r: clip ref missing",
+                        name,
+                    )
+                    return None
+                return coll.new_clip(name=name, clip=clip,
+                                     channel=ch, frame_start=fs)
+            if stype == "MASK":
+                token = sd.get("mask_ref")
+                mask = _datablock_ref.resolve_ref(token) if token else None
+                if mask is None:
+                    self._warn(
+                        "vse apply skipped MASK %r: mask ref missing",
+                        name,
+                    )
+                    return None
+                return coll.new_mask(name=name, mask=mask,
+                                     channel=ch, frame_start=fs)
             if stype in _ZERO_INPUT_EFFECTS:
                 return coll.new_effect(name=name, type=stype, channel=ch,
                                        frame_start=fs, length=length)
@@ -446,6 +481,7 @@ class VSEStripCategoryHandler:
         "filepath", "directory",
         "sound_path", "sound_name",
         "scene_ref", "scene_camera_ref",
+        "clip_ref", "mask_ref",
         "input_1", "input_2",
         "length",
         "transform",
