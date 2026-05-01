@@ -2,12 +2,27 @@
 
 Reuses the shared NodeTree serialization in `_nodetree`. Operates on
 scene.node_tree (compositor) rather than material.node_tree.
+
+Blender 5's GPU compositor refactor removed the legacy global knobs
+(`edit_quality`, `render_quality`, `chunk_size`, `use_opencl`,
+`use_groupnode_buffer`, `use_two_pass`) — those decisions are now
+per-node. Only `use_viewer_border` survived, and it is documented as
+kept for compatibility. We forward that single flag for completeness.
 """
 from __future__ import annotations
 
 from typing import Any
 
 from . import _nodetree
+
+
+# Settings that live on the compositor's node_tree itself in 5.x.
+# `use_viewer_border` is the only survivor of the GPU compositor
+# refactor — kept here so a 4.x sender talking to a 4.x peer still
+# round-trips it, and so a 5.x build sees no spurious dead settings.
+_TREE_FIELDS = (
+    "use_viewer_border",
+)
 
 
 class CompositorCategoryHandler:
@@ -30,8 +45,21 @@ class CompositorCategoryHandler:
             "use_nodes": bool(scene.use_nodes),
         }
         if scene.use_nodes and scene.node_tree is not None:
-            op["nodes"] = [_nodetree.serialize_node(n) for n in scene.node_tree.nodes]
-            op["links"] = [_nodetree.serialize_link(l) for l in scene.node_tree.links]
+            tree = scene.node_tree
+            op["nodes"] = [_nodetree.serialize_node(n) for n in tree.nodes]
+            op["links"] = [_nodetree.serialize_link(l) for l in tree.links]
+            tree_props: dict[str, Any] = {}
+            for f in _TREE_FIELDS:
+                if not hasattr(tree, f):
+                    continue
+                try:
+                    v = getattr(tree, f)
+                except Exception:
+                    continue
+                if isinstance(v, (int, float, bool, str)):
+                    tree_props[f] = v
+            if tree_props:
+                op["tree_props"] = tree_props
         out.append(op)
         return out
 
@@ -50,6 +78,20 @@ class CompositorCategoryHandler:
                 _nodetree.apply_nodetree(
                     scene.node_tree, op.get("nodes", []), op.get("links", [])
                 )
+                tree = scene.node_tree
+                for k, v in (op.get("tree_props") or {}).items():
+                    if not hasattr(tree, k):
+                        continue
+                    try:
+                        cur = getattr(tree, k)
+                        if isinstance(cur, bool):
+                            setattr(tree, k, bool(v))
+                        elif isinstance(cur, (int, float)):
+                            setattr(tree, k, type(cur)(v))
+                        else:
+                            setattr(tree, k, v)
+                    except Exception:
+                        pass
 
     def build_full(self) -> list[dict[str, Any]]:
         return self.collect()

@@ -11,7 +11,15 @@ _RENDER_FIELDS = [
     "film_transparent",
     "filepath",
     "use_compositing", "use_sequencer",
+    "use_audio", "use_overwrite", "use_placeholder",
+    "use_file_extension", "use_render_cache",
     "threads", "threads_mode",
+    "pixel_aspect_x", "pixel_aspect_y",
+    # Border crop region. The four floats are emitted only if
+    # use_border is True on the sender; otherwise leaving them at the
+    # default doesn't matter.
+    "border_min_x", "border_min_y",
+    "border_max_x", "border_max_y",
 ]
 
 _IMAGE_FIELDS = [
@@ -31,6 +39,11 @@ _VIEW_LAYER_PASS_FIELDS = [
     "use_pass_glossy_direct", "use_pass_glossy_indirect", "use_pass_glossy_color",
     "use_pass_transmission_direct", "use_pass_transmission_indirect",
     "use_pass_emit", "use_pass_environment", "use_pass_shadow", "use_pass_ambient_occlusion",
+    # Cryptomatte (4.x+) — separate object / material / asset masks. The
+    # compositor relies on these for matte-based selection; missing them
+    # silently breaks any cryptomatte-driven node tree.
+    "use_pass_cryptomatte_object", "use_pass_cryptomatte_material",
+    "use_pass_cryptomatte_asset", "use_pass_cryptomatte_accurate",
 ]
 
 
@@ -196,30 +209,78 @@ class RenderCategoryHandler:
                     except Exception:
                         pass
 
-        for vl_data in op.get("view_layers") or []:
-            name = vl_data.get("name")
-            if not name:
-                continue
-            vl = scene.view_layers.get(name)
-            if vl is None:
+        wire_layers = op.get("view_layers") or []
+        if wire_layers:
+            target_names = [vl_data.get("name", "") for vl_data in wire_layers]
+            target_set = {n for n in target_names if n}
+            # Remove view layers the sender no longer has. Compositor
+            # Render Layer nodes look these up by name, so leaving stale
+            # ones around silently produces empty render outputs on the
+            # peer side. Blender refuses to delete the last view layer,
+            # so we leave at least one in place even if all are absent.
+            for vl in list(scene.view_layers):
+                if vl.name in target_set:
+                    continue
+                if len(scene.view_layers) <= 1:
+                    break
                 try:
-                    vl = scene.view_layers.new(name=name)
-                except Exception:
+                    scene.view_layers.remove(vl)
+                except RuntimeError:
+                    # Most common RuntimeError here is "Render layer is
+                    # the active layer" — Blender prevents removing
+                    # the active one. Skip and keep going.
+                    pass
+
+            for vl_data in wire_layers:
+                name = vl_data.get("name")
+                if not name:
                     continue
-            for k, v in vl_data.items():
-                if k in ("name", "cycles_samples"):
-                    continue
-                if hasattr(vl, k):
+                vl = scene.view_layers.get(name)
+                if vl is None:
                     try:
-                        setattr(vl, k, v)
+                        vl = scene.view_layers.new(name=name)
+                    except Exception:
+                        continue
+                for k, v in vl_data.items():
+                    if k in ("name", "cycles_samples"):
+                        continue
+                    if hasattr(vl, k):
+                        try:
+                            setattr(vl, k, v)
+                        except Exception:
+                            pass
+                cy = getattr(vl, "cycles", None)
+                if (
+                    cy is not None
+                    and "cycles_samples" in vl_data
+                    and hasattr(cy, "samples")
+                ):
+                    try:
+                        cy.samples = int(vl_data["cycles_samples"])
                     except Exception:
                         pass
-            cy = getattr(vl, "cycles", None)
-            if cy is not None and "cycles_samples" in vl_data and hasattr(cy, "samples"):
-                try:
-                    cy.samples = int(vl_data["cycles_samples"])
-                except Exception:
-                    pass
+
+            # Order parity. Compositor Render Layers nodes look up by
+            # name (so masking still works without this), but UI and
+            # the listed render order match what the sender sees only
+            # after we walk the wire order and `move` each layer into
+            # position.
+            move = getattr(scene.view_layers, "move", None)
+            if callable(move):
+                for desired_idx, name in enumerate(target_names):
+                    if not name:
+                        continue
+                    cur_idx = next(
+                        (i for i, vl in enumerate(scene.view_layers)
+                         if vl.name == name),
+                        -1,
+                    )
+                    if cur_idx < 0 or cur_idx == desired_idx:
+                        continue
+                    try:
+                        move(cur_idx, desired_idx)
+                    except Exception:
+                        pass
         if "cycles" in op and hasattr(scene, "cycles"):
             for k, v in op["cycles"].items():
                 if hasattr(scene.cycles, k):
