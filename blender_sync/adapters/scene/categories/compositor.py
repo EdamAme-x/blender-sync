@@ -3,9 +3,11 @@
 Reuses the shared NodeTree serialization in `_nodetree`. Operates on
 scene.node_tree (compositor) rather than material.node_tree.
 
-Also covers compositor-side scene flags that the Render handler can't
-reach: render-tree edit/preview shading, dither (in render), and the
-node_tree's own quality / chunk settings.
+Blender 5's GPU compositor refactor removed the legacy global knobs
+(`edit_quality`, `render_quality`, `chunk_size`, `use_opencl`,
+`use_groupnode_buffer`, `use_two_pass`) — those decisions are now
+per-node. Only `use_viewer_border` survived, and it is documented as
+kept for compatibility. We forward that single flag for completeness.
 """
 from __future__ import annotations
 
@@ -14,15 +16,11 @@ from typing import Any
 from . import _nodetree
 
 
-# Settings that live on the compositor's node_tree itself (not on
-# scene). Present in Blender 4.x; gated via hasattr for forward-compat.
+# Settings that live on the compositor's node_tree itself in 5.x.
+# `use_viewer_border` is the only survivor of the GPU compositor
+# refactor — kept here so a 4.x sender talking to a 4.x peer still
+# round-trips it, and so a 5.x build sees no spurious dead settings.
 _TREE_FIELDS = (
-    "edit_quality",
-    "render_quality",
-    "chunk_size",
-    "use_opencl",
-    "use_groupnode_buffer",
-    "use_two_pass",
     "use_viewer_border",
 )
 

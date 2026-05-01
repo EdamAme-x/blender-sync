@@ -536,19 +536,22 @@ def test_render_fields_cover_compositor_audio_flags():
         assert needed in _RENDER_FIELDS
 
 
-def test_compositor_serialize_emits_tree_props():
-    """The compositor's node_tree itself carries quality/chunk_size
-    settings that affect render appearance. Verify they reach the
-    wire."""
+def test_compositor_serialize_emits_use_viewer_border():
+    """In Blender 5 the only compositor node_tree-level prop that
+    survived the GPU refactor is `use_viewer_border`. Verify the wire
+    carries it and does not regress to the legacy 4.x quality/chunk
+    fields (which silently no-op on 5.x)."""
     from blender_sync.adapters.scene.categories.compositor import (
         CompositorCategoryHandler,
+        _TREE_FIELDS,
     )
 
+    # Lock the field list so we don't reintroduce removed-in-5.0
+    # legacy fields without a deliberate decision.
+    assert _TREE_FIELDS == ("use_viewer_border",)
+
     class FakeTree:
-        edit_quality = "MEDIUM"
-        render_quality = "HIGH"
-        chunk_size = 256
-        use_opencl = False
+        use_viewer_border = True
         nodes = ()
         links = ()
 
@@ -562,10 +565,7 @@ def test_compositor_serialize_emits_tree_props():
     assert len(out) == 1
     op = out[0]
     assert op["use_nodes"] is True
-    assert "tree_props" in op
-    tp = op["tree_props"]
-    assert tp["render_quality"] == "HIGH"
-    assert tp["chunk_size"] == 256
+    assert op["tree_props"]["use_viewer_border"] is True
 
 
 def test_sound_serialize_picks_filepath():
