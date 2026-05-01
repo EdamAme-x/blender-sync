@@ -22,7 +22,7 @@ _OFF_KW = dict(
     armature=False, pose=False, shape_keys=False,
     constraints=False, grease_pencil=False, curve=False, particle=False,
     node_group=False, texture=False, lattice=False, metaball=False,
-    volume=False, point_cloud=False,
+    volume=False, point_cloud=False, vse_strip=False,
 )
 
 
@@ -58,6 +58,7 @@ def test_enabled_categories_default_includes_all():
         CategoryKind.METABALL,
         CategoryKind.VOLUME,
         CategoryKind.POINT_CLOUD,
+        CategoryKind.VSE_STRIP,
     ):
         assert needed in cats, f"missing {needed}"
 
@@ -132,6 +133,7 @@ class _FakeSnap:
     metaballs = frozenset()
     volumes = frozenset()
     point_clouds = frozenset()
+    vse_strip = False
     render = False
     compositor = False
     scene_world = False
@@ -382,6 +384,119 @@ def test_dirty_tracker_carries_volume_point_cloud():
 def test_volume_point_cloud_use_reliable_channel():
     assert CATEGORY_TO_CHANNEL[CategoryKind.VOLUME] is ChannelKind.RELIABLE
     assert CATEGORY_TO_CHANNEL[CategoryKind.POINT_CLOUD] is ChannelKind.RELIABLE
+
+
+def test_vse_strip_handler_no_bpy_graceful():
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        vse_strip = True
+
+    h = VSEStripCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+    assert h.build_full() == []
+
+
+def test_vse_strip_uses_reliable_channel():
+    assert CATEGORY_TO_CHANNEL[CategoryKind.VSE_STRIP] is ChannelKind.RELIABLE
+
+
+def test_dirty_tracker_carries_vse_strip():
+    t = DirtyTracker()
+    t.mark_vse_strip()
+    snap = t.flush()
+    assert snap.vse_strip is True
+    assert t.flush().is_empty()
+
+
+def test_vse_strip_collect_skipped_when_flag_clear():
+    """If DirtyContext.vse_strip is False, the handler must short-circuit
+    without paying the bpy import."""
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        vse_strip = False
+
+    h = VSEStripCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+
+
+def test_vse_strip_hash_dedupe():
+    """Repeated identical timeline payloads must not be re-sent.
+    Drives the per-scene hash cache path."""
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    h = VSEStripCategoryHandler()
+    op = {"scene": "Scene", "active": True, "strips": []}
+    d1 = h._hash_op(op)
+    d2 = h._hash_op({"scene": "Scene", "active": True, "strips": []})
+    assert d1 == d2
+    assert d1 != h._hash_op({"scene": "Scene", "active": True,
+                              "strips": [{"name": "S1"}]})
+
+
+def test_vse_effect_constants_match_blender_5():
+    """`new_effect` enum in Blender 5 dropped TRANSFORM and OVER_DROP.
+    The handler's effect-type sets must reflect that — sending an
+    invalid type to a peer would raise on `new_effect` and the strip
+    would silently be lost. Lock the valid set with a test."""
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+
+    # TRANSFORM and OVER_DROP must NOT appear anywhere in the effect
+    # type buckets. Blender 5 supplants them with the per-strip
+    # `Strip.transform` sub-struct (handled separately in serialize).
+    all_effects = (
+        vsm._ZERO_INPUT_EFFECTS
+        | vsm._ONE_INPUT_EFFECTS
+        | vsm._TWO_INPUT_EFFECTS
+    )
+    assert "TRANSFORM" not in all_effects
+    assert "OVER_DROP" not in all_effects
+    # Sanity: the documented Blender 5 enum values we care about.
+    assert "COLOR" in vsm._ZERO_INPUT_EFFECTS
+    assert "TEXT" in vsm._ZERO_INPUT_EFFECTS
+    assert "GAUSSIAN_BLUR" in vsm._ONE_INPUT_EFFECTS
+    assert "GLOW" in vsm._ONE_INPUT_EFFECTS
+    assert "MULTICAM" in vsm._ONE_INPUT_EFFECTS
+    assert "CROSS" in vsm._TWO_INPUT_EFFECTS
+    assert "COLORMIX" in vsm._TWO_INPUT_EFFECTS
+
+
+def test_vse_strip_serialize_omits_transform_legacy_props():
+    """The legacy TRANSFORM strip-type and its `translate_start_x`
+    family are gone in Blender 5. Make sure the handler doesn't
+    reintroduce them via _TYPE_SPECIFIC."""
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+
+    assert "TRANSFORM" not in vsm._TYPE_SPECIFIC
+    for fields in vsm._TYPE_SPECIFIC.values():
+        for f in fields:
+            assert not f.startswith("translate_start_"), (
+                f"legacy field {f} leaked into _TYPE_SPECIFIC"
+            )
+
+
+def test_vse_apply_blacklist_rejects_input_keys():
+    """`input_1` / `input_2` are wire-only; the apply loop must not
+    setattr them onto the strip (they're populated via the new_effect
+    constructor in the second pass)."""
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    blacklist = VSEStripCategoryHandler._APPLY_BLACKLIST
+    assert "input_1" in blacklist
+    assert "input_2" in blacklist
+    assert "length" in blacklist
+    assert "transform" in blacklist  # handled via dedicated branch
 
 
 def test_pose_serializes_custom_shape_fields_when_present():
