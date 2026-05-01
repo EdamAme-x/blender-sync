@@ -9,6 +9,7 @@ class FakeSceneGateway:
         self.dirty: dict[CategoryKind, list[dict[str, Any]]] = {}
         self.applied: list[tuple[CategoryKind, list[dict[str, Any]]]] = []
         self.snapshot: list[tuple[CategoryKind, list[dict[str, Any]]]] = []
+        self.snapshot_initial_flags: list[bool] = []
         self.installed = False
 
     def is_applying_remote(self) -> bool:
@@ -37,5 +38,8 @@ class FakeSceneGateway:
     def apply_ops(self, category: CategoryKind, ops: list[dict[str, Any]]) -> None:
         self.applied.append((category, list(ops)))
 
-    def build_full_snapshot(self) -> list[tuple[CategoryKind, list[dict[str, Any]]]]:
+    def build_full_snapshot(
+        self, *, initial_snapshot: bool = False,
+    ) -> list[tuple[CategoryKind, list[dict[str, Any]]]]:
+        self.snapshot_initial_flags.append(initial_snapshot)
         return list(self.snapshot)

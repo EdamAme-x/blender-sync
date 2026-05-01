@@ -206,7 +206,7 @@ class PointCloudCategoryHandler:
         except Exception:
             pass
 
-    def build_full(self) -> list[dict[str, Any]]:
+    def build_full(self, max_points: int | None = None) -> list[dict[str, Any]]:
         try:
             import bpy
         except ImportError:
@@ -214,7 +214,4 @@ class PointCloudCategoryHandler:
         coll = getattr(bpy.data, "pointclouds", None)
         if coll is None:
             return []
-        # Apply the snapshot truncation here so the initial-snapshot
-        # phase doesn't stall on big clouds. Force sync still sends full
-        # data because it goes through `collect()` (no max_points there).
-        return [self._serialize(p, max_points=_BUILD_FULL_MAX_POINTS) for p in coll]
+        return [self._serialize(p, max_points=max_points) for p in coll]

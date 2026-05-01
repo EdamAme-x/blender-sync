@@ -3,6 +3,9 @@ plus the SyncFilters.enabled_categories() central source-of-truth.
 """
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 from blender_sync.domain.entities import (
     CATEGORY_TO_CHANNEL,
     CategoryKind,
@@ -142,6 +145,68 @@ class _FakeSnap:
     render = False
     compositor = False
     scene_world = False
+
+
+class _FakePointAttrData:
+    def __init__(self, n: int, prop: str):
+        self.n = n
+        self.prop = prop
+
+    def __len__(self):
+        return self.n
+
+    def __iter__(self):
+        if self.prop == "vector":
+            for _ in range(self.n):
+                yield SimpleNamespace(vector=(1.0, 2.0, 3.0))
+        else:
+            for _ in range(self.n):
+                yield SimpleNamespace(value=0.5)
+
+    def foreach_get(self, key, buf):
+        assert key == self.prop
+        try:
+            if self.prop == "vector":
+                buf[:] = 1.0
+            else:
+                buf[:] = 0.5
+            return
+        except Exception:
+            pass
+        value = 1.0 if self.prop == "vector" else 0.5
+        for i in range(len(buf)):
+            buf[i] = value
+
+
+class _FakePointAttr:
+    def __init__(self, n: int, prop: str):
+        self.data = _FakePointAttrData(n, prop)
+
+
+class _FakePointAttrs:
+    def __init__(self, n: int):
+        self._d = {
+            "position": _FakePointAttr(n, "vector"),
+            "radius": _FakePointAttr(n, "value"),
+        }
+
+    def get(self, k):
+        return self._d.get(k)
+
+
+class _FakePoints:
+    def __init__(self, n: int):
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+
+class _FakePointCloud:
+    def __init__(self, name: str, n: int):
+        self.name = name
+        self.points = _FakePoints(n)
+        self.attributes = _FakePointAttrs(n)
 
 
 def test_camera_handler_no_bpy_graceful():
@@ -353,27 +418,108 @@ def test_point_cloud_serialize_uses_attribute_api():
     assert len(out["radii"]) == 4
 
 
-def test_point_cloud_build_full_truncates_oversize():
+def test_point_cloud_serialize_truncates_oversize_when_limit_passed():
     from blender_sync.adapters.scene.categories.point_cloud import (
         PointCloudCategoryHandler,
         _BUILD_FULL_MAX_POINTS,
     )
 
-    class FakePoints:
-        def __init__(self, n): self.n = n
-        def __len__(self): return self.n
-
-    class FakePC:
-        def __init__(self, name, n):
-            self.name = name
-            self.points = FakePoints(n)
-
     h = PointCloudCategoryHandler()
-    out = h._serialize(FakePC("Big", _BUILD_FULL_MAX_POINTS + 1),
+    out = h._serialize(_FakePointCloud("Big", _BUILD_FULL_MAX_POINTS + 1),
                        max_points=_BUILD_FULL_MAX_POINTS)
     assert out["truncated"] is True
     assert "positions" not in out
     assert "radii" not in out
+
+
+def test_point_cloud_serialize_limit_is_inclusive_not_truncated():
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+        _BUILD_FULL_MAX_POINTS,
+    )
+
+    h = PointCloudCategoryHandler()
+    out = h._serialize(
+        _FakePointCloud("Limit", _BUILD_FULL_MAX_POINTS),
+        max_points=_BUILD_FULL_MAX_POINTS,
+    )
+    assert out["count"] == _BUILD_FULL_MAX_POINTS
+    assert "truncated" not in out
+    assert len(out["positions"]) == _BUILD_FULL_MAX_POINTS * 3
+    assert len(out["radii"]) == _BUILD_FULL_MAX_POINTS
+
+
+def test_point_cloud_serialize_none_limit_sends_100k_points():
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+        _BUILD_FULL_MAX_POINTS,
+    )
+
+    h = PointCloudCategoryHandler()
+    pc = _FakePointCloud("Big", 100_000)
+    full = h._serialize(pc, max_points=None)
+    truncated = h._serialize(pc, max_points=_BUILD_FULL_MAX_POINTS)
+
+    assert full["count"] == 100_000
+    assert "truncated" not in full
+    assert len(full["positions"]) == 300_000
+    assert len(full["radii"]) == 100_000
+    assert truncated["truncated"] is True
+    assert "positions" not in truncated
+
+
+def test_point_cloud_build_full_default_is_unbounded_for_force_sync(monkeypatch):
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+        _BUILD_FULL_MAX_POINTS,
+    )
+
+    fake_bpy = SimpleNamespace(
+        data=SimpleNamespace(pointclouds=[
+            _FakePointCloud("Big", _BUILD_FULL_MAX_POINTS + 1),
+        ]),
+    )
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+
+    h = PointCloudCategoryHandler()
+    full = h.build_full()
+    bounded = h.build_full(max_points=_BUILD_FULL_MAX_POINTS)
+
+    assert full[0]["count"] == _BUILD_FULL_MAX_POINTS + 1
+    assert "truncated" not in full[0]
+    assert len(full[0]["positions"]) == (_BUILD_FULL_MAX_POINTS + 1) * 3
+    assert bounded[0]["truncated"] is True
+    assert "positions" not in bounded[0]
+
+
+def test_gateway_only_bounds_point_cloud_for_initial_snapshot():
+    from blender_sync.adapters.scene.bpy_scene_gateway import BpySceneGateway
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        _BUILD_FULL_MAX_POINTS,
+    )
+    from tests.fakes.logger import RecordingLogger
+
+    class FakePointCloudHandler:
+        def __init__(self):
+            self.calls: list[int | None] = []
+
+        def build_full(self, max_points=None):
+            self.calls.append(max_points)
+            return [{"name": "Big"}]
+
+    gateway = BpySceneGateway(RecordingLogger(), DirtyTracker())
+    handler = FakePointCloudHandler()
+    gateway._handlers = {CategoryKind.POINT_CLOUD: handler}
+
+    assert gateway.build_full_snapshot() == [
+        (CategoryKind.POINT_CLOUD, [{"name": "Big"}]),
+    ]
+    assert handler.calls == [None]
+
+    assert gateway.build_full_snapshot(initial_snapshot=True) == [
+        (CategoryKind.POINT_CLOUD, [{"name": "Big"}]),
+    ]
+    assert handler.calls == [None, _BUILD_FULL_MAX_POINTS]
 
 
 def test_dirty_tracker_carries_volume_point_cloud():

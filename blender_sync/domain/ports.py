@@ -71,7 +71,7 @@ class ISceneApplier(Protocol):
 class ISceneSnapshot(Protocol):
     """Full-state read for Force Push and Initial Snapshot."""
     def build_full_snapshot(
-        self,
+        self, *, initial_snapshot: bool = False,
     ) -> list[tuple[CategoryKind, list[dict[str, Any]]]]: ...
     def set_applying_remote(self, value: bool) -> None: ...
     def apply_ops(

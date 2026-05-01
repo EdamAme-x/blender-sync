@@ -22,6 +22,7 @@ from blender_sync.usecases.force_sync import (
     ForcePullUseCase,
     ForcePushUseCase,
 )
+from blender_sync.usecases.snapshot import SnapshotUseCase
 from tests.fakes.async_runner import ImmediateAsyncRunner
 from tests.fakes.clock import FakeClock
 from tests.fakes.logger import RecordingLogger
@@ -88,6 +89,49 @@ def test_force_push_packet_marked_force():
     decoded = _JsonCodec().decode(transport.sent[0][1])
     assert decoded.force is True
     assert decoded.author == "me"
+
+
+def test_force_push_requests_unbounded_snapshot_for_100k_point_cloud():
+    scene, transport, cfg, builder, push, _ = _setup()
+    session = Session(local_peer=Peer("me"), status=SessionStatus.LIVE)
+    scene.snapshot = [
+        (CategoryKind.POINT_CLOUD, [{
+            "name": "Big",
+            "count": 100_000,
+            "positions": [0.0, 0.0, 0.0],
+            "radii": [1.0],
+        }]),
+    ]
+
+    sent = push.execute(session)
+
+    assert sent == 1
+    assert scene.snapshot_initial_flags == [False]
+    decoded = _JsonCodec().decode(transport.sent[0][1])
+    assert decoded.category is CategoryKind.POINT_CLOUD
+    assert decoded.force is True
+    assert decoded.ops[0]["count"] == 100_000
+    assert "truncated" not in decoded.ops[0]
+
+
+def test_initial_snapshot_requests_bounded_snapshot_mode():
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    scene = FakeSceneGateway()
+    transport = InMemoryTransport()
+    cfg = SyncConfig(peer_id="me")
+    builder = PacketBuilder("me", SeqCounter())
+    uc = SnapshotUseCase(
+        scene, transport, _JsonCodec(), FakeClock(),
+        RecordingLogger(), ImmediateAsyncRunner(), builder, cfg,
+    )
+    scene.snapshot = [(CategoryKind.POINT_CLOUD, [{"name": "Big"}])]
+
+    uc.send_initial()
+
+    assert scene.snapshot_initial_flags == [True]
+    decoded = _JsonCodec().decode(transport.sent[0][1])
+    assert decoded.category is CategoryKind.SNAPSHOT
+    assert decoded.ops[0]["category"] == CategoryKind.POINT_CLOUD.value
 
 
 def test_force_pull_sends_control_packet():

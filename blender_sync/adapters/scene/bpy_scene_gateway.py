@@ -21,7 +21,10 @@ from .categories.lattice import LatticeCategoryHandler
 from .categories.metaball import MetaballCategoryHandler
 from .categories.node_group import NodeGroupCategoryHandler
 from .categories.particle import ParticleCategoryHandler
-from .categories.point_cloud import PointCloudCategoryHandler
+from .categories.point_cloud import (
+    PointCloudCategoryHandler,
+    _BUILD_FULL_MAX_POINTS,
+)
 from .categories.sound import SoundCategoryHandler
 from .categories.texture import TextureCategoryHandler
 from .categories.view3d import View3DCategoryHandler
@@ -284,11 +287,16 @@ class BpySceneGateway(ISceneGateway):
         except Exception as exc:
             self._logger.error("apply failed for %s: %s", category, exc)
 
-    def build_full_snapshot(self) -> list[tuple[CategoryKind, list[dict[str, Any]]]]:
+    def build_full_snapshot(
+        self, *, initial_snapshot: bool = False,
+    ) -> list[tuple[CategoryKind, list[dict[str, Any]]]]:
         out: list[tuple[CategoryKind, list[dict[str, Any]]]] = []
         for category, handler in self._handlers.items():
             try:
-                ops = handler.build_full()
+                if initial_snapshot and category is CategoryKind.POINT_CLOUD:
+                    ops = handler.build_full(max_points=_BUILD_FULL_MAX_POINTS)
+                else:
+                    ops = handler.build_full()
             except Exception as exc:
                 self._logger.error("build_full failed for %s: %s", category, exc)
                 continue
