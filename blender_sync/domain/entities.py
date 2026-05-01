@@ -41,6 +41,7 @@ class CategoryKind(str, Enum):
     VOLUME = "volume"
     POINT_CLOUD = "point_cloud"
     VSE_STRIP = "vse_strip"
+    SOUND = "sound"
     SNAPSHOT = "snapshot"
     CONTROL = "control"
 
@@ -90,6 +91,7 @@ CATEGORY_TO_CHANNEL: dict[CategoryKind, ChannelKind] = {
     CategoryKind.VOLUME: ChannelKind.RELIABLE,
     CategoryKind.POINT_CLOUD: ChannelKind.RELIABLE,
     CategoryKind.VSE_STRIP: ChannelKind.RELIABLE,
+    CategoryKind.SOUND: ChannelKind.RELIABLE,
     CategoryKind.SNAPSHOT: ChannelKind.RELIABLE,
     CategoryKind.CONTROL: ChannelKind.RELIABLE,
 }
@@ -215,6 +217,7 @@ class SyncFilters:
     volume: bool = True
     point_cloud: bool = True
     vse_strip: bool = True
+    sound: bool = True
 
     def enabled_categories(self) -> frozenset["CategoryKind"]:
         out: set[CategoryKind] = set()
@@ -248,6 +251,7 @@ class SyncFilters:
         if self.volume: out.add(CategoryKind.VOLUME)
         if self.point_cloud: out.add(CategoryKind.POINT_CLOUD)
         if self.vse_strip: out.add(CategoryKind.VSE_STRIP)
+        if self.sound: out.add(CategoryKind.SOUND)
         # Deletion + rename are always enabled — removing them would let
         # stale state accumulate on peers indefinitely.
         out.add(CategoryKind.DELETION)

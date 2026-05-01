@@ -33,6 +33,7 @@ _LOOKUP = {
     "camera": "cameras",
     "light": "lights",
     "mesh": "meshes",
+    "sound": "sounds",
 }
 
 
@@ -63,6 +64,7 @@ def try_ref(value: Any) -> str | None:
         (bpy.types.Camera, "camera"),
         (bpy.types.Light, "light"),
         (bpy.types.Mesh, "mesh"),
+        (bpy.types.Sound, "sound"),
     )
     for cls, kind in type_to_kind:
         try:

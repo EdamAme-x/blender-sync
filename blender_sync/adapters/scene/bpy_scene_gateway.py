@@ -22,6 +22,7 @@ from .categories.metaball import MetaballCategoryHandler
 from .categories.node_group import NodeGroupCategoryHandler
 from .categories.particle import ParticleCategoryHandler
 from .categories.point_cloud import PointCloudCategoryHandler
+from .categories.sound import SoundCategoryHandler
 from .categories.texture import TextureCategoryHandler
 from .categories.volume import VolumeCategoryHandler
 from .categories.vse_strip import VSEStripCategoryHandler
@@ -86,6 +87,7 @@ class BpySceneGateway(ISceneGateway):
         self._handlers: dict[CategoryKind, Any] = {
             # Tier 1: foundational data blocks referenced by others
             CategoryKind.IMAGE: ImageCategoryHandler(),
+            CategoryKind.SOUND: SoundCategoryHandler(),
             CategoryKind.TEXTURE: TextureCategoryHandler(),
             CategoryKind.NODE_GROUP: NodeGroupCategoryHandler(),
             CategoryKind.ARMATURE: ArmatureCategoryHandler(),
@@ -264,6 +266,8 @@ class BpySceneGateway(ISceneGateway):
             return bool(snap.point_clouds)
         if category is CategoryKind.VSE_STRIP:
             return bool(getattr(snap, "vse_strip", False))
+        if category is CategoryKind.SOUND:
+            return bool(getattr(snap, "sounds", frozenset()))
         return False
 
     def apply_ops(self, category: CategoryKind, ops: list[dict[str, Any]]) -> None:
@@ -419,6 +423,11 @@ class BpySceneGateway(ISceneGateway):
                         gateway._tracker.mark_collection(obj_name)
                     elif isinstance(obj, bpy.types.Image):
                         gateway._tracker.mark_image(obj_name)
+                    elif (
+                        getattr(bpy.types, "Sound", None) is not None
+                        and isinstance(obj, bpy.types.Sound)
+                    ):
+                        gateway._tracker.mark_sound(obj_name)
                     elif isinstance(obj, bpy.types.Armature):
                         gateway._tracker.mark_armature(obj_name)
                     elif isinstance(obj, bpy.types.Curve):
