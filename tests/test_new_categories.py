@@ -670,6 +670,50 @@ def test_vse_strip_hash_dedupe():
                               "strips": [{"name": "S1"}]})
 
 
+def test_vse_remote_apply_clears_hash_so_return_to_local_a_resends(monkeypatch):
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    class S(_FakeSnap):
+        vse_strip = True
+
+    class FakeStrip:
+        def __init__(self, name: str):
+            self.name = name
+            self.type = "COLOR"
+            self.channel = 1
+            self.frame_start = 1
+            self.frame_final_duration = 10
+            self.transform = None
+
+    def set_timeline(scene, names):
+        strips = [FakeStrip(name) for name in names]
+        scene.sequence_editor = SimpleNamespace(
+            show_overlay_frame=False,
+            strips_all=strips,
+            sequences_all=strips,
+        )
+
+    scene = _FakeVSEScene("Scene")
+    set_timeline(scene, ["A"])
+    _install_fake_vse_bpy(monkeypatch, [scene], scene)
+
+    h = VSEStripCategoryHandler()
+    ctx = DirtyContext(S())
+    first = h.collect(ctx)
+    assert first
+    assert h.collect(ctx) == []
+
+    h.apply([{"scene": "Scene", "active": False, "strips": []}])
+    assert "Scene" not in h._sent_hash
+
+    set_timeline(scene, ["A"])
+    resend = h.collect(ctx)
+    assert resend == first
+
+
 def test_vse_apply_missing_named_scene_does_not_clear_active(monkeypatch):
     from blender_sync.adapters.scene.categories.vse_strip import (
         VSEStripCategoryHandler,

@@ -315,6 +315,9 @@ class VSEStripCategoryHandler:
                 scene = bpy.context.scene
             if scene is None:
                 continue
+            scene_name = getattr(scene, "name", None)
+            if isinstance(scene_name, str):
+                self._sent_hash.pop(scene_name, None)
             self._apply_scene(bpy, scene, op)
 
     def _apply_scene(self, bpy, scene, op: dict[str, Any]) -> None:
