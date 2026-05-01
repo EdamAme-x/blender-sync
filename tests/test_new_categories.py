@@ -513,6 +513,61 @@ def test_dirty_tracker_carries_sound():
     assert t.flush().is_empty()
 
 
+def test_render_view_layer_pass_fields_cover_cryptomatte():
+    """Compositor cryptomatte nodes need the per-pass enables on the
+    sender's view layer to land on the peer. Lock the field list."""
+    from blender_sync.adapters.scene.categories.render import (
+        _VIEW_LAYER_PASS_FIELDS,
+    )
+    for needed in (
+        "use_pass_cryptomatte_object",
+        "use_pass_cryptomatte_material",
+        "use_pass_cryptomatte_asset",
+    ):
+        assert needed in _VIEW_LAYER_PASS_FIELDS
+
+
+def test_render_fields_cover_compositor_audio_flags():
+    """Render-side scene flags: use_compositing / use_sequencer /
+    use_audio drive the rendered output significantly. Without them
+    peers render with the wrong post-pipe."""
+    from blender_sync.adapters.scene.categories.render import _RENDER_FIELDS
+    for needed in ("use_compositing", "use_sequencer", "use_audio"):
+        assert needed in _RENDER_FIELDS
+
+
+def test_compositor_serialize_emits_tree_props():
+    """The compositor's node_tree itself carries quality/chunk_size
+    settings that affect render appearance. Verify they reach the
+    wire."""
+    from blender_sync.adapters.scene.categories.compositor import (
+        CompositorCategoryHandler,
+    )
+
+    class FakeTree:
+        edit_quality = "MEDIUM"
+        render_quality = "HIGH"
+        chunk_size = 256
+        use_opencl = False
+        nodes = ()
+        links = ()
+
+    class FakeScene:
+        name = "Scene"
+        use_nodes = True
+        node_tree = FakeTree()
+
+    h = CompositorCategoryHandler()
+    out = h._serialize(FakeScene())
+    assert len(out) == 1
+    op = out[0]
+    assert op["use_nodes"] is True
+    assert "tree_props" in op
+    tp = op["tree_props"]
+    assert tp["render_quality"] == "HIGH"
+    assert tp["chunk_size"] == 256
+
+
 def test_sound_serialize_picks_filepath():
     from blender_sync.adapters.scene.categories.sound import (
         SoundCategoryHandler,
