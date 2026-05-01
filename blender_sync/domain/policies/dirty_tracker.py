@@ -28,6 +28,7 @@ class DirtySnapshot:
     metaballs: frozenset[str]
     volumes: frozenset[str]
     point_clouds: frozenset[str]
+    sounds: frozenset[str]
     render: bool
     compositor: bool
     scene_world: bool
@@ -58,6 +59,7 @@ class DirtySnapshot:
             and not self.metaballs
             and not self.volumes
             and not self.point_clouds
+            and not self.sounds
             and not self.render
             and not self.compositor
             and not self.scene_world
@@ -90,6 +92,7 @@ class DirtyTracker:
     metaballs: set[str] = field(default_factory=set)
     volumes: set[str] = field(default_factory=set)
     point_clouds: set[str] = field(default_factory=set)
+    sounds: set[str] = field(default_factory=set)
     render: bool = False
     compositor: bool = False
     scene_world: bool = False
@@ -176,6 +179,9 @@ class DirtyTracker:
     def mark_point_cloud(self, name: str) -> None:
         self.point_clouds.add(name)
 
+    def mark_sound(self, name: str) -> None:
+        self.sounds.add(name)
+
     def flush(self) -> DirtySnapshot:
         snap = DirtySnapshot(
             objects_transform=frozenset(self.objects_transform),
@@ -201,6 +207,7 @@ class DirtyTracker:
             metaballs=frozenset(self.metaballs),
             volumes=frozenset(self.volumes),
             point_clouds=frozenset(self.point_clouds),
+            sounds=frozenset(self.sounds),
             render=self.render,
             compositor=self.compositor,
             scene_world=self.scene_world,
@@ -229,6 +236,7 @@ class DirtyTracker:
         self.metaballs.clear()
         self.volumes.clear()
         self.point_clouds.clear()
+        self.sounds.clear()
         self.render = False
         self.compositor = False
         self.scene_world = False

@@ -23,6 +23,7 @@ _OFF_KW = dict(
     constraints=False, grease_pencil=False, curve=False, particle=False,
     node_group=False, texture=False, lattice=False, metaball=False,
     volume=False, point_cloud=False, vse_strip=False,
+    sound=False,
 )
 
 
@@ -59,6 +60,7 @@ def test_enabled_categories_default_includes_all():
         CategoryKind.VOLUME,
         CategoryKind.POINT_CLOUD,
         CategoryKind.VSE_STRIP,
+        CategoryKind.SOUND,
     ):
         assert needed in cats, f"missing {needed}"
 
@@ -133,6 +135,7 @@ class _FakeSnap:
     metaballs = frozenset()
     volumes = frozenset()
     point_clouds = frozenset()
+    sounds = frozenset()
     vse_strip = False
     render = False
     compositor = False
@@ -482,6 +485,51 @@ def test_vse_strip_serialize_omits_transform_legacy_props():
             assert not f.startswith("translate_start_"), (
                 f"legacy field {f} leaked into _TYPE_SPECIFIC"
             )
+
+
+def test_sound_handler_no_bpy_graceful():
+    from blender_sync.adapters.scene.categories.sound import (
+        SoundCategoryHandler,
+    )
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+
+    class S(_FakeSnap):
+        sounds = frozenset({"BGM"})
+
+    h = SoundCategoryHandler()
+    assert h.collect(DirtyContext(S())) == []
+    assert h.build_full() == []
+
+
+def test_sound_uses_reliable_channel():
+    assert CATEGORY_TO_CHANNEL[CategoryKind.SOUND] is ChannelKind.RELIABLE
+
+
+def test_dirty_tracker_carries_sound():
+    t = DirtyTracker()
+    t.mark_sound("BGM")
+    snap = t.flush()
+    assert "BGM" in snap.sounds
+    assert t.flush().is_empty()
+
+
+def test_sound_serialize_picks_filepath():
+    from blender_sync.adapters.scene.categories.sound import (
+        SoundCategoryHandler,
+    )
+
+    class FakeSound:
+        name = "BGM"
+        filepath = "//audio/bgm.wav"
+        use_memory_cache = True
+        use_mono = False
+
+    h = SoundCategoryHandler()
+    out = h._serialize(FakeSound())
+    assert out["name"] == "BGM"
+    assert out["props"]["filepath"] == "//audio/bgm.wav"
+    assert out["props"]["use_memory_cache"] is True
+    assert out["props"]["use_mono"] is False
 
 
 def test_vse_apply_blacklist_rejects_input_keys():

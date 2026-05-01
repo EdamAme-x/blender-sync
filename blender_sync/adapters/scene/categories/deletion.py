@@ -42,6 +42,7 @@ _TRACKED = (
     ("particle_settings", "particles"),
     ("volume",        "volumes"),
     ("point_cloud",   "pointclouds"),
+    ("sound",         "sounds"),
 )
 
 

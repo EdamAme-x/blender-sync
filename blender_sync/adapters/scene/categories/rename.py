@@ -37,6 +37,7 @@ _TRACKED = (
     ("metaball",   "metaballs"),
     ("volume",     "volumes"),
     ("point_cloud","pointclouds"),
+    ("sound",      "sounds"),
 )
 
 

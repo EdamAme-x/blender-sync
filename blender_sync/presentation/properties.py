@@ -39,6 +39,7 @@ class SyncSessionState(PropertyGroup):
     sync_volume: BoolProperty(name="Volume", default=True)
     sync_point_cloud: BoolProperty(name="Point Cloud", default=True)
     sync_vse_strip: BoolProperty(name="VSE Strip", default=True)
+    sync_sound: BoolProperty(name="Sound", default=True)
 
     conflict_policy: bpy.props.EnumProperty(
         name="Conflict Policy",

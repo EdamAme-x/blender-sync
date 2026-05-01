@@ -22,6 +22,7 @@ from .categories.metaball import MetaballCategoryHandler
 from .categories.node_group import NodeGroupCategoryHandler
 from .categories.particle import ParticleCategoryHandler
 from .categories.point_cloud import PointCloudCategoryHandler
+from .categories.sound import SoundCategoryHandler
 from .categories.texture import TextureCategoryHandler
 from .categories.volume import VolumeCategoryHandler
 from .categories.vse_strip import VSEStripCategoryHandler
@@ -86,6 +87,7 @@ class BpySceneGateway(ISceneGateway):
         self._handlers: dict[CategoryKind, Any] = {
             # Tier 1: foundational data blocks referenced by others
             CategoryKind.IMAGE: ImageCategoryHandler(),
+            CategoryKind.SOUND: SoundCategoryHandler(),
             CategoryKind.TEXTURE: TextureCategoryHandler(),
             CategoryKind.NODE_GROUP: NodeGroupCategoryHandler(),
             CategoryKind.ARMATURE: ArmatureCategoryHandler(),
@@ -264,6 +266,8 @@ class BpySceneGateway(ISceneGateway):
             return bool(snap.point_clouds)
         if category is CategoryKind.VSE_STRIP:
             return bool(getattr(snap, "vse_strip", False))
+        if category is CategoryKind.SOUND:
+            return bool(getattr(snap, "sounds", frozenset()))
         return False
 
     def apply_ops(self, category: CategoryKind, ops: list[dict[str, Any]]) -> None:
@@ -324,6 +328,35 @@ class BpySceneGateway(ISceneGateway):
             )
         except Exception:
             pass
+
+        # Sound property toggles do not flow through depsgraph reliably
+        # (Sound is a leaf ID with no evaluated graph involvement). Hook
+        # them here so use_memory_cache / use_mono edits propagate. The
+        # callback can't see *which* Sound changed, so we mark every
+        # current Sound dirty — collect() then sends only the ones whose
+        # serialized form differs (the dirty set is a hint, not a diff).
+        sound_t = getattr(bpy.types, "Sound", None)
+        if sound_t is not None:
+            for prop in ("use_memory_cache", "use_mono"):
+                try:
+                    bpy.msgbus.subscribe_rna(
+                        key=(sound_t, prop),
+                        owner=owner, args=(),
+                        notify=make_cb(self._mark_all_sounds),
+                    )
+                except Exception:
+                    pass
+
+    def _mark_all_sounds(self) -> None:
+        try:
+            import bpy
+        except ImportError:
+            return
+        sounds = getattr(bpy.data, "sounds", None)
+        if sounds is None:
+            return
+        for snd in sounds:
+            self._tracker.mark_sound(snd.name)
 
     def _make_depsgraph_handler(self):
         gateway = self
@@ -419,6 +452,11 @@ class BpySceneGateway(ISceneGateway):
                         gateway._tracker.mark_collection(obj_name)
                     elif isinstance(obj, bpy.types.Image):
                         gateway._tracker.mark_image(obj_name)
+                    elif (
+                        getattr(bpy.types, "Sound", None) is not None
+                        and isinstance(obj, bpy.types.Sound)
+                    ):
+                        gateway._tracker.mark_sound(obj_name)
                     elif isinstance(obj, bpy.types.Armature):
                         gateway._tracker.mark_armature(obj_name)
                     elif isinstance(obj, bpy.types.Curve):
