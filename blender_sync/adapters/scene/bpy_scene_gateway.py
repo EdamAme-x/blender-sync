@@ -122,7 +122,7 @@ class BpySceneGateway(ISceneGateway):
             CategoryKind.CAMERA: CameraCategoryHandler(),
             CategoryKind.LIGHT: LightCategoryHandler(),
             CategoryKind.ANIMATION: AnimationCategoryHandler(),
-            CategoryKind.VSE_STRIP: VSEStripCategoryHandler(),
+            CategoryKind.VSE_STRIP: VSEStripCategoryHandler(logger=logger),
             CategoryKind.VIEW3D: View3DCategoryHandler(),
             # Tier 4: maintenance ops — must run last so deletion/rename
             # don't trip up references in earlier tiers.

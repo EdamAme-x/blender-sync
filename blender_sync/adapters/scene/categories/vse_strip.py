@@ -100,11 +100,20 @@ _TRANSFORM_PROPS = (
 class VSEStripCategoryHandler:
     category_name = "vse_strip"
 
-    def __init__(self) -> None:
+    def __init__(self, logger: Any | None = None) -> None:
         # Per-scene last-sent hash. Suppresses re-sends when the Scene
         # depsgraph fires for unrelated reasons (frame change, render
         # tweaks) but the timeline content hasn't actually moved.
         self._sent_hash: dict[str, str] = {}
+        self._logger = logger
+
+    def _warn(self, msg: str, *args: Any) -> None:
+        if self._logger is None:
+            return
+        try:
+            self._logger.warning(msg, *args)
+        except Exception:
+            pass
 
     def collect(self, ctx: DirtyContext) -> list[dict[str, Any]]:
         if not ctx.vse_strip:
@@ -285,7 +294,17 @@ class VSEStripCategoryHandler:
         except ImportError:
             return
         for op in ops:
-            scene = bpy.data.scenes.get(op.get("scene", "")) or bpy.context.scene
+            if "scene" in op:
+                scene_name = op.get("scene")
+                scene = (
+                    bpy.data.scenes.get(scene_name)
+                    if isinstance(scene_name, str) else None
+                )
+                if scene is None:
+                    self._warn("vse apply skipped: scene not found: %r", scene_name)
+                    continue
+            else:
+                scene = bpy.context.scene
             if scene is None:
                 continue
             self._apply_scene(bpy, scene, op)

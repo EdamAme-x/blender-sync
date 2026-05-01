@@ -209,6 +209,49 @@ class _FakePointCloud:
         self.attributes = _FakePointAttrs(n)
 
 
+class _FakeSceneMap:
+    def __init__(self, scenes):
+        self._scenes = list(scenes)
+        self._by_name = {s.name: s for s in self._scenes}
+
+    def __iter__(self):
+        return iter(self._scenes)
+
+    def get(self, name):
+        return self._by_name.get(name)
+
+
+class _FakeVSEScene:
+    def __init__(self, name: str):
+        self.name = name
+        self.sequence_editor = None
+        self.clear_count = 0
+        self.create_count = 0
+
+    def sequence_editor_clear(self):
+        self.clear_count += 1
+        self.sequence_editor = None
+
+    def sequence_editor_create(self):
+        self.create_count += 1
+        self.sequence_editor = SimpleNamespace(
+            show_overlay_frame=False,
+            strips=[],
+            sequences=[],
+            strips_all=[],
+            sequences_all=[],
+        )
+
+
+def _install_fake_vse_bpy(monkeypatch, scenes, active_scene):
+    fake_bpy = SimpleNamespace(
+        data=SimpleNamespace(scenes=_FakeSceneMap(scenes)),
+        context=SimpleNamespace(scene=active_scene),
+    )
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    return fake_bpy
+
+
 def test_camera_handler_no_bpy_graceful():
     from blender_sync.adapters.scene.categories.camera import CameraCategoryHandler
     from blender_sync.adapters.scene.categories.base import DirtyContext
@@ -592,6 +635,57 @@ def test_vse_strip_hash_dedupe():
     assert d1 == d2
     assert d1 != h._hash_op({"scene": "Scene", "active": True,
                               "strips": [{"name": "S1"}]})
+
+
+def test_vse_apply_missing_named_scene_does_not_clear_active(monkeypatch):
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+    from tests.fakes.logger import RecordingLogger
+
+    active = _FakeVSEScene("Active")
+    logger = RecordingLogger()
+    _install_fake_vse_bpy(monkeypatch, [active], active)
+
+    h = VSEStripCategoryHandler(logger=logger)
+    h.apply([{"scene": "RenamedAway", "active": False, "strips": []}])
+
+    assert active.clear_count == 0
+    assert active.create_count == 0
+    assert any(
+        level == "WARN" and "RenamedAway" in text
+        for level, text in logger.records
+    )
+
+
+def test_vse_apply_matching_scene_clears_named_scene_only(monkeypatch):
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    active = _FakeVSEScene("Active")
+    target = _FakeVSEScene("Timeline")
+    _install_fake_vse_bpy(monkeypatch, [active, target], active)
+
+    h = VSEStripCategoryHandler()
+    h.apply([{"scene": "Timeline", "active": False, "strips": []}])
+
+    assert target.clear_count == 1
+    assert active.clear_count == 0
+
+
+def test_vse_apply_without_scene_key_uses_context_fallback(monkeypatch):
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    active = _FakeVSEScene("Active")
+    _install_fake_vse_bpy(monkeypatch, [active], active)
+
+    h = VSEStripCategoryHandler()
+    h.apply([{"active": False, "strips": []}])
+
+    assert active.clear_count == 1
 
 
 def test_vse_effect_constants_match_blender_5():
