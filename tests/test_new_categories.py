@@ -1077,6 +1077,74 @@ def test_sound_serialize_picks_filepath():
     assert out["props"]["use_mono"] is False
 
 
+def test_gateway_sound_msgbus_subscribes_filepath():
+    from blender_sync.adapters.scene.bpy_scene_gateway import BpySceneGateway
+    from tests.fakes.logger import RecordingLogger
+
+    class MsgBus:
+        def __init__(self):
+            self.keys = []
+
+        def subscribe_rna(self, key, owner, args, notify):
+            self.keys.append(key)
+
+    class SoundType:
+        filepath = object()
+        use_memory_cache = object()
+        use_mono = object()
+
+    class Types:
+        RenderSettings = type("RenderSettings", (), {})
+        Scene = type("Scene", (), {})
+        View3DShading = type("View3DShading", (), {})
+        Sound = SoundType
+
+    fake_bpy = SimpleNamespace(types=Types, msgbus=MsgBus())
+    gateway = BpySceneGateway(RecordingLogger(), DirtyTracker())
+
+    gateway._subscribe_msgbus(fake_bpy)
+
+    sound_props = {
+        prop for cls, prop in fake_bpy.msgbus.keys
+        if cls is SoundType
+    }
+    assert {"filepath", "use_memory_cache", "use_mono"} <= sound_props
+
+
+def test_gateway_sound_msgbus_skips_missing_filepath_property():
+    from blender_sync.adapters.scene.bpy_scene_gateway import BpySceneGateway
+    from tests.fakes.logger import RecordingLogger
+
+    class MsgBus:
+        def __init__(self):
+            self.keys = []
+
+        def subscribe_rna(self, key, owner, args, notify):
+            self.keys.append(key)
+
+    class SoundType:
+        use_memory_cache = object()
+        use_mono = object()
+
+    class Types:
+        RenderSettings = type("RenderSettings", (), {})
+        Scene = type("Scene", (), {})
+        View3DShading = type("View3DShading", (), {})
+        Sound = SoundType
+
+    fake_bpy = SimpleNamespace(types=Types, msgbus=MsgBus())
+    gateway = BpySceneGateway(RecordingLogger(), DirtyTracker())
+
+    gateway._subscribe_msgbus(fake_bpy)
+
+    sound_props = [
+        prop for cls, prop in fake_bpy.msgbus.keys
+        if cls is SoundType
+    ]
+    assert "filepath" not in sound_props
+    assert set(sound_props) == {"use_memory_cache", "use_mono"}
+
+
 def test_vse_apply_blacklist_rejects_input_keys():
     """`input_1` / `input_2` are wire-only; the apply loop must not
     setattr them onto the strip (they're populated via the new_effect

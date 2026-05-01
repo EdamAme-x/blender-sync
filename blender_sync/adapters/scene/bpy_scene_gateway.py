@@ -343,13 +343,15 @@ class BpySceneGateway(ISceneGateway):
 
         # Sound property toggles do not flow through depsgraph reliably
         # (Sound is a leaf ID with no evaluated graph involvement). Hook
-        # them here so use_memory_cache / use_mono edits propagate. The
+        # them here so filepath / cache / mono edits propagate. The
         # callback can't see *which* Sound changed, so we mark every
         # current Sound dirty — collect() then sends only the ones whose
         # serialized form differs (the dirty set is a hint, not a diff).
         sound_t = getattr(bpy.types, "Sound", None)
         if sound_t is not None:
-            for prop in ("use_memory_cache", "use_mono"):
+            for prop in ("filepath", "use_memory_cache", "use_mono"):
+                if not hasattr(sound_t, prop):
+                    continue
                 try:
                     bpy.msgbus.subscribe_rna(
                         key=(sound_t, prop),
