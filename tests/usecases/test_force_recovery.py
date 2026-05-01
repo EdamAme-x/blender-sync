@@ -251,6 +251,96 @@ def test_force_push_chain_catchup_state():
     assert st.chain.b == (force.chain >> 16) & 0xFFFF
 
 
+def test_stale_force_resend_does_not_rewind_chain():
+    """P1-11: a force packet resent after later packets have already
+    advanced the chain must NOT rewind expected_seq / last_verified_seq.
+
+    Scenario (from codex 5th review):
+      1. sender emits force seq=2, rel seq=3
+      2. rel seq=3 arrives first (held back)
+      3. force seq=2 arrives — catches up, drains rel3 → expected_seq=4
+      4. force seq=2 RESEND arrives late (e.g. duplicate from network)
+      5. without P1-11 the receiver rewinds to expected_seq=3 and the
+         next reliable packet looks like a gap → spurious NACK for
+         already-applied seqs.
+    """
+    uc, scene, codec = _make_uc()
+    nacks: list = []
+    uc.set_nack_emitter(lambda a, f, l: nacks.append((a, f, l)))
+
+    sender = PacketBuilder("alice", SeqCounter())
+    # Burn seq=1 (rel that we'll lose).
+    sender.build(CategoryKind.MATERIAL, [{"mat": "lost"}], 1.0)
+    force = sender.build(CategoryKind.MATERIAL,
+                         [{"mat": "Snap"}], 2.0, force=True)
+    rel3 = sender.build(CategoryKind.MATERIAL, [{"mat": "After"}], 3.0)
+
+    # Out-of-order arrival: rel3 first.
+    uc.apply_raw(codec.encode(rel3))
+    # Then the force, which catches up + drains rel3.
+    uc.apply_raw(codec.encode(force))
+    state_after_first_force = uc._chains["alice"]
+    expected_after = state_after_first_force.expected_seq
+    assert expected_after == 4
+    assert state_after_first_force.last_verified_seq == 3
+    assert len(scene.applied) == 2
+
+    # The rel3 received before the force triggered an NACK for seqs
+    # 1..2 (gap detection). Snapshot that count here so the test of
+    # "stale force does not generate new NACKs" is decoupled from the
+    # unrelated initial gap NACK.
+    nacks_baseline = list(nacks)
+
+    # Now a stale RESEND of the same force packet arrives.
+    uc.apply_raw(codec.encode(force))
+
+    # Chain state must not have rewound.
+    state_after = uc._chains["alice"]
+    assert state_after.expected_seq == expected_after
+    assert state_after.last_verified_seq == 3
+    # Force payload re-applies (force is authoritative; idempotent at
+    # the scene level), so applied count grows but chain stays put.
+    assert len(scene.applied) == 3
+
+    # And a follow-up reliable packet at seq=4 still applies cleanly.
+    rel4 = sender.build(CategoryKind.MATERIAL, [{"mat": "Next"}], 4.0)
+    uc.apply_raw(codec.encode(rel4))
+    assert len(scene.applied) == 4
+    # No NEW NACKs were emitted by the stale force or the follow-up;
+    # only the original gap NACK from rel3 arriving early is present.
+    assert nacks == nacks_baseline
+
+
+def test_stale_force_does_not_resurrect_obsolete_held_back():
+    """A stale force resend whose seq is already verified should not
+    discard held-back entries that arrived later (they would still be
+    obsolete by the time of the original force, but we shouldn't be
+    re-running the cleanup pass on stale arrivals because the held_back
+    snapshot at that time isn't the same)."""
+    uc, scene, codec = _make_uc()
+    uc.set_nack_emitter(lambda a, f, l: None)
+
+    sender = PacketBuilder("alice", SeqCounter())
+    sender.build(CategoryKind.MATERIAL, [{"mat": "lost"}], 1.0)
+    force = sender.build(CategoryKind.MATERIAL,
+                         [{"mat": "Snap"}], 2.0, force=True)
+    rel3 = sender.build(CategoryKind.MATERIAL, [{"mat": "After"}], 3.0)
+    rel4 = sender.build(CategoryKind.MATERIAL, [{"mat": "Last"}], 4.0)
+
+    # Apply force first (no rel3, rel4 yet).
+    uc.apply_raw(codec.encode(force))
+    # Now rel4 arrives but rel3 is missing — rel4 held back.
+    uc.apply_raw(codec.encode(rel4))
+    assert 4 in uc._chains["alice"].held_back
+
+    # Stale force resend.
+    uc.apply_raw(codec.encode(force))
+
+    # rel4 should still be held back (the stale force did not touch
+    # the held_back map because of the early return).
+    assert 4 in uc._chains["alice"].held_back
+
+
 def test_force_push_does_not_touch_lww_for_other_keys():
     """Force apply records LWW for ops in the packet but doesn't
     overwrite unrelated keys."""

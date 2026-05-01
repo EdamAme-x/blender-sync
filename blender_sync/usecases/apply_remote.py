@@ -188,8 +188,22 @@ class ApplyRemotePacketUseCase:
         Newer held-backs are left in place; the caller drains them
         AFTER the force payload is applied so the apply order matches
         the seq order on the wire.
+
+        IMPORTANT: only realign forward. A stale force RESEND can
+        arrive after newer packets have already advanced the chain
+        (e.g. original force seq=2 already filled the gap and the
+        RESEND of that same seq is reaching us late). Rewinding
+        last_verified_seq backward in that case would NACK
+        already-applied seqs and silently re-apply stale force state.
+        We still let the force payload apply (idempotent at the scene
+        level), but we leave the chain state alone.
         """
         st = self._state(packet.author)
+        if packet.seq <= st.last_verified_seq:
+            # Stale force — do not rewind chain bookkeeping. The payload
+            # is still applied by the caller (force is authoritative
+            # within its own (seq, ts) ordering).
+            return
         st.expected_seq = packet.seq + 1
         st.last_verified_seq = packet.seq
         st.chain.a = packet.chain & 0xFFFF
