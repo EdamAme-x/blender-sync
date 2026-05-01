@@ -476,7 +476,13 @@ class BpySceneGateway(ISceneGateway):
         for o in bpy.data.objects:
             t.mark_transform(o.name)
             t.mark_visibility(o.name)
-            if hasattr(o, "modifiers") and len(o.modifiers) > 0:
+            # Always mark Modifier when the object has a modifiers
+            # collection — even if it's currently empty. The handler
+            # serializes an empty list as "clear all modifiers", which
+            # is the right behavior when undo just removed the last
+            # modifier on the object. Pre-fix this `if len > 0` gate
+            # caused peers to retain a stale modifier stack.
+            if hasattr(o, "modifiers"):
                 t.mark_modifier(o.name, "")
             if o.type == "ARMATURE":
                 t.mark_pose(o.name)
@@ -485,10 +491,17 @@ class BpySceneGateway(ISceneGateway):
             data = getattr(o, "data", None)
             if data is not None and getattr(data, "shape_keys", None):
                 t.mark_shape_keys(o.name)
-        # Datablock-level collections.
+            # Mesh committed is keyed by the OBJECT name (not the mesh
+            # datablock name) because MeshCategoryHandler resolves via
+            # bpy.data.objects.get(name). Walk objects of type MESH
+            # here so a renamed object whose mesh datablock keeps the
+            # old name still gets its geometry rebroadcast.
+            if o.type == "MESH":
+                t.mark_mesh_committed(o.name)
+        # Datablock-level collections (NOT meshes — handled above by
+        # walking objects).
         for name_attr, mark in (
             ("materials", t.mark_material),
-            ("meshes", t.mark_mesh_committed),
             ("cameras", t.mark_camera),
             ("lights", t.mark_light),
             ("collections", t.mark_collection),

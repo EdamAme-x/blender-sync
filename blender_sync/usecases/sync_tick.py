@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from ..domain.entities import CategoryKind, Session, SessionStatus, SyncConfig
+from ..domain.entities import (
+    CATEGORY_TO_CHANNEL, CategoryKind, ChannelKind,
+    Session, SessionStatus, SyncConfig,
+)
 from ..domain.policies.packet_builder import OutboundHistory, PacketBuilder
 from ..domain.ports import (
     IAsyncRunner,
@@ -71,8 +74,19 @@ class SyncTickUseCase:
         for category, ops in grouped:
             if not ops:
                 continue
+            # Force flag is only meaningful on RELIABLE-channel
+            # categories. FAST-channel ops (transform / pose / view3d)
+            # ride the unordered+lossy lane with chain==0; they have no
+            # ordering guarantee, so a force-flagged FAST packet that
+            # arrives late would bypass LWW and silently rewind the
+            # peer to the older state. Strip force on those categories
+            # — the next normal FAST packet from the new local state
+            # will overwrite peers in the right direction.
+            packet_force = force_this_tick and (
+                CATEGORY_TO_CHANNEL.get(category) is ChannelKind.RELIABLE
+            )
             packet = self._builder.build(
-                category, ops, ts, force=force_this_tick,
+                category, ops, ts, force=packet_force,
             )
             try:
                 data = self._codec.encode(packet)
