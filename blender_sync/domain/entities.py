@@ -297,7 +297,7 @@ class SignalingConfig:
     # is published. Includes peer's gather + answer + relay propagation.
     # Too short causes unnecessary fallback to manual SDP; too long delays
     # the manual fallback UX.
-    nostr_timeout_seconds: float = 30.0
+    nostr_timeout_seconds: float = 180.0
     answer_timeout_seconds: float = 120.0
 
 
