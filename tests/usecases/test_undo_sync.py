@@ -172,14 +172,15 @@ def test_undo_flag_consumed_even_when_grouped_is_empty():
     assert decoded[0].force is False
 
 
-def test_undo_force_strips_force_flag_on_fast_categories():
-    """P1-14: undo broadcasts must NOT mark FAST-channel packets
-    (TRANSFORM/POSE/VIEW3D) as force=True. Those packets ride the
-    unordered+lossy lane; a force-flagged late arrival would bypass
-    LWW and silently revert the peer to the old state.
+def test_undo_force_keeps_flag_on_all_categories_post_p2_28():
+    """After P2-28, force=True promotes any category — including
+    FAST ones — to the reliable chain. The earlier P1-14 strip is
+    no longer needed (and is actively harmful: it would drop undo
+    transforms entirely if their FAST packet were lost in flight).
 
-    The next normal FAST packet from the new local state will
-    overwrite peers in the right direction anyway."""
+    Contract: undo tick produces force=True on every category, and
+    every packet rides the reliable counter + chain.
+    """
     asyncio.set_event_loop(asyncio.new_event_loop())
     scene = FakeSceneGateway()
     transport = InMemoryTransport()
@@ -203,20 +204,17 @@ def test_undo_force_strips_force_flag_on_fast_categories():
 
     assert len(transport.sent) == 4
     decoded = [_JsonCodec().decode(d) for _, d in transport.sent]
-    by_cat = {p.category: p for p in decoded}
-    # Reliable category: force=True (LWW-bypass intentional, and the
-    # reliable chain ensures ordering).
-    assert by_cat[CategoryKind.MATERIAL].force is True
-    # FAST categories: force flag stripped.
-    assert by_cat[CategoryKind.TRANSFORM].force is False
-    assert by_cat[CategoryKind.POSE].force is False
-    assert by_cat[CategoryKind.VIEW3D].force is False
+    # Every category force=True — the strip from P1-14 is reverted.
+    assert all(p.force for p in decoded)
+    # Every packet rides the reliable counter (P2-28 promotion).
+    assert rel_seq.current == 4
+    assert fast_seq.current == 0
 
 
-def test_undo_force_packet_uses_reliable_seq_counter():
-    """Force packets ride the reliable counter (P1-8 + P1-10 contract).
-    A post-undo force batch must therefore advance the reliable
-    counter, not the unreliable one."""
+def test_undo_force_uses_reliable_counter_for_all_categories():
+    """All force packets — including TRANSFORM — must consume the
+    reliable seq counter so NACK/RESEND covers them. This is the
+    P2-28 promotion exercised end-to-end via SyncTick."""
     asyncio.set_event_loop(asyncio.new_event_loop())
     scene = FakeSceneGateway()
     transport = InMemoryTransport()
@@ -235,17 +233,12 @@ def test_undo_force_packet_uses_reliable_seq_counter():
     scene.dirty[CategoryKind.TRANSFORM] = [{"n": "Cube"}]
     uc.tick(session)
 
-    # 2 packets sent. MATERIAL (RELIABLE) is force=True; TRANSFORM
-    # (FAST) is force=False per P1-14 — force on FAST would let a
-    # late arrival roll peers back since FAST has no ordering.
     decoded = [_JsonCodec().decode(d) for _, d in transport.sent]
-    by_cat = {p.category: p for p in decoded}
-    assert by_cat[CategoryKind.MATERIAL].force is True
-    assert by_cat[CategoryKind.TRANSFORM].force is False
-    # MATERIAL is on the reliable chain; TRANSFORM rides the
-    # unreliable counter.
-    assert rel_seq.current == 1
-    assert fast_seq.current == 1
+    # Both packets are force=True per the new policy.
+    assert all(p.force for p in decoded)
+    # Both ride the reliable counter (P2-28 promotion).
+    assert rel_seq.current == 2
+    assert fast_seq.current == 0
 
 
 # ----------------------------------------------------------------------

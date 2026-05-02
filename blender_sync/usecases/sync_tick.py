@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from ..domain.entities import (
-    CATEGORY_TO_CHANNEL, CategoryKind, ChannelKind,
-    Session, SessionStatus, SyncConfig,
+    CategoryKind, Session, SessionStatus, SyncConfig,
 )
 from ..domain.policies.packet_builder import OutboundHistory, PacketBuilder
 from ..domain.ports import (
@@ -75,19 +74,18 @@ class SyncTickUseCase:
         for category, ops in grouped:
             if not ops:
                 continue
-            # Force flag is only meaningful on RELIABLE-channel
-            # categories. FAST-channel ops (transform / pose / view3d)
-            # ride the unordered+lossy lane with chain==0; they have no
-            # ordering guarantee, so a force-flagged FAST packet that
-            # arrives late would bypass LWW and silently rewind the
-            # peer to the older state. Strip force on those categories
-            # — the next normal FAST packet from the new local state
-            # will overwrite peers in the right direction.
-            packet_force = force_this_tick and (
-                CATEGORY_TO_CHANNEL.get(category) is ChannelKind.RELIABLE
-            )
+            # Pass force_this_tick through unchanged for every
+            # category. PacketBuilder/Packet now promote force=True
+            # to the reliable chain regardless of the category's
+            # nominal channel (P2-28), so a force packet for
+            # TRANSFORM/POSE/VIEW3D rides the ordered, history-backed
+            # path and is no longer susceptible to lossy reordering.
+            # An earlier guard here stripped force on FAST categories
+            # to avoid late arrivals rewinding peers, but with the
+            # new routing that guard would just drop undo ops
+            # entirely if the FAST packet were lost in flight.
             packet = self._builder.build(
-                category, ops, ts, force=packet_force,
+                category, ops, ts, force=force_this_tick,
             )
             try:
                 data = self._codec.encode(packet)
