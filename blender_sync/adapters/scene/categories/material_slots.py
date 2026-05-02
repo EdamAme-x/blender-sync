@@ -21,6 +21,14 @@ class MaterialSlotsCategoryHandler:
 
     category_name = "material_slots"
 
+    def __init__(self) -> None:
+        # Per-object "last sent slot count" — used to suppress the
+        # empty-slot clear-op when the object never had slots in the
+        # first place. Without this guard, every transform of an
+        # un-slotted object would broadcast `slots: []` and wipe
+        # peers that locally hold slots for the same name.
+        self._last_sent_count: dict[str, int] = {}
+
     def collect(self, ctx: DirtyContext) -> list[dict[str, Any]]:
         try:
             import bpy
@@ -44,10 +52,16 @@ class MaterialSlotsCategoryHandler:
             }
             for slot in obj.material_slots
         ]
-        # Always return an op — empty `slots` means "remove all
-        # material slots", required for undo cases where the user
-        # cleared the slot list. apply path resizes the slot list
-        # down via obj.data.materials.pop, so an empty target works.
+        cur_n = len(slots)
+        # Suppress emit when the object has no slots AND we never
+        # sent a non-empty list for it. Otherwise transform-only
+        # edits would broadcast an empty clear-op and wipe peers'
+        # slots for un-slotted objects on our side. Once we've sent
+        # a non-empty list, the next empty list IS a real "user
+        # cleared the stack" event and must propagate.
+        if cur_n == 0 and self._last_sent_count.get(obj.name, 0) == 0:
+            return None
+        self._last_sent_count[obj.name] = cur_n
         return {"obj": obj.name, "slots": slots}
 
     def apply(self, ops: list[dict[str, Any]]) -> None:

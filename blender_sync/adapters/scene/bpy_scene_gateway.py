@@ -762,9 +762,20 @@ class BpySceneGateway(ISceneGateway):
                 # objects in hand (cheap; same loop as other live work).
                 fresh_sk: dict[str, str] = {}
                 fresh_action: dict[str, set[tuple[str, str]]] = {}
+                # Snapshot of "owners with animation_data" observed
+                # this depsgraph cycle. The undo path reads this so
+                # that an undo step which clears animation_data on a
+                # newly-animated owner can still emit a clear-op
+                # (otherwise the very first undo after a fresh
+                # animation_data_create would see "live=None,
+                # previous=empty" and broadcast nothing).
+                fresh_animated: set[tuple[str, str]] = set()
 
                 def _record_action_user(kind: str, ad, owner_name: str) -> None:
-                    if ad is not None and ad.action is not None:
+                    if ad is None:
+                        return
+                    fresh_animated.add((kind, owner_name))
+                    if ad.action is not None:
                         fresh_action.setdefault(ad.action.name, set()).add(
                             (kind, owner_name)
                         )
@@ -807,6 +818,15 @@ class BpySceneGateway(ISceneGateway):
 
                 gateway._shape_key_to_owner = fresh_sk
                 gateway._action_to_users = fresh_action
+                # Union with the existing snapshot so that an owner
+                # which already lost its animation_data (e.g. via
+                # operator) is still remembered for the next undo
+                # cycle. The undo walk diffs `_previously_animated`
+                # vs. live to emit clear-ops, so removing entries
+                # eagerly here would defeat that path.
+                gateway._previously_animated = (
+                    gateway._previously_animated | fresh_animated
+                )
 
                 gateway._cleanup_counter += 1
                 if gateway._cleanup_counter >= gateway._cleanup_interval:

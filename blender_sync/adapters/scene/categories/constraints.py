@@ -51,6 +51,14 @@ def _serialize_value(value: Any) -> Any:
 class ConstraintsCategoryHandler:
     category_name = "constraints"
 
+    def __init__(self) -> None:
+        # Same dedupe pattern as material_slots: only emit a clear-op
+        # for an object once we've actually sent a non-empty stack
+        # for it. Without this, every transform of an unconstrained
+        # object would broadcast `constraints: []` and tear down
+        # peers' real constraints for the same object name.
+        self._last_sent_count: dict[str, int] = {}
+
     def collect(self, ctx: DirtyContext) -> list[dict[str, Any]]:
         try:
             import bpy
@@ -67,11 +75,16 @@ class ConstraintsCategoryHandler:
         return ops
 
     def _serialize(self, obj) -> dict[str, Any] | None:
-        # Always return an op (even with an empty constraints list)
-        # so that an undo step which cleared all constraints reaches
-        # peers. Apply rebuilds the stack from this list, so an empty
-        # list = "remove all constraints".
         if not hasattr(obj, "constraints"):
+            return None
+        cur_n = len(obj.constraints)
+        # Skip the empty clear-op for objects whose constraint stack
+        # has always been empty on our side — broadcasting it would
+        # destroy peers' constraints for objects that just happen to
+        # share a name. Once we've sent a non-empty list, a later
+        # empty list IS a real "user cleared the stack" event and
+        # must propagate.
+        if cur_n == 0 and self._last_sent_count.get(obj.name, 0) == 0:
             return None
         constraints = []
         for c in obj.constraints:
@@ -93,6 +106,7 @@ class ConstraintsCategoryHandler:
                 if ser is not None:
                     cd["props"][attr] = ser
             constraints.append(cd)
+        self._last_sent_count[obj.name] = len(constraints)
         return {"obj": obj.name, "constraints": constraints}
 
     def apply(self, ops: list[dict[str, Any]]) -> None:

@@ -1314,40 +1314,85 @@ def test_modifier_serialize_walks_nested_settings():
     assert "rna_type" not in deep
 
 
-def test_material_slots_serialize_with_empty_slots_emits_op():
-    """P2-22: when undo removes all material slots, the serializer
-    must still return an op (with empty slots list) so peers clear
-    their stack. Pre-fix returned None and peers retained slots."""
+def test_material_slots_serialize_empty_only_after_having_sent_non_empty():
+    """P2-22 + P2-26: empty `slots` is a clear-op that wipes peers.
+    To avoid wiping peers' state on a plain transform of an
+    un-slotted object, the empty op only fires once we've actually
+    sent a non-empty list before. First-time-empty is suppressed."""
     from blender_sync.adapters.scene.categories.material_slots import (
         MaterialSlotsCategoryHandler,
     )
 
-    class EmptyObj:
-        name = "Cube"
-        material_slots = ()
+    class FakeSlot:
+        def __init__(self, mat: str | None = None, link: str = "DATA"):
+            self.material = (
+                type("M", (), {"name": mat})() if mat else None
+            )
+            self.link = link
 
+    class TogglingObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.material_slots = ()
+
+    obj = TogglingObj()
     h = MaterialSlotsCategoryHandler()
-    out = h._serialize(EmptyObj())
-    assert out is not None
-    assert out["obj"] == "Cube"
-    assert out["slots"] == []
+
+    # First observation: empty slots, never sent → suppress.
+    assert h._serialize(obj) is None
+
+    # User adds a slot → emit.
+    obj.material_slots = (FakeSlot(mat="Mat"),)
+    out1 = h._serialize(obj)
+    assert out1 is not None
+    assert len(out1["slots"]) == 1
+
+    # User clears all slots → emit empty (clear-op).
+    obj.material_slots = ()
+    out2 = h._serialize(obj)
+    assert out2 is not None
+    assert out2["slots"] == []
+
+    # Subsequent observation while still empty → suppress again
+    # (we already broadcast the clear).
+    assert h._serialize(obj) is None
 
 
-def test_constraints_serialize_with_no_constraints_emits_op():
-    """P2-22: empty constraints stack must still be broadcast."""
+def test_constraints_serialize_empty_only_after_having_sent_non_empty():
+    """P2-22 + P2-26: empty constraints == "remove all" on apply.
+    Suppress the first-time-empty case so a plain transform of an
+    unconstrained object doesn't wipe peers' constraints for an
+    object that just shares a name."""
     from blender_sync.adapters.scene.categories.constraints import (
         ConstraintsCategoryHandler,
     )
 
-    class EmptyObj:
-        name = "Cube"
-        constraints = ()
+    class FakeConstraint:
+        def __init__(self, name: str = "Limit"):
+            self.name = name
+            self.type = "LIMIT_LOCATION"
 
+    class TogglingObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.constraints = ()
+
+    obj = TogglingObj()
     h = ConstraintsCategoryHandler()
-    out = h._serialize(EmptyObj())
-    assert out is not None
-    assert out["obj"] == "Cube"
-    assert out["constraints"] == []
+
+    assert h._serialize(obj) is None  # first observation, empty → suppress
+
+    obj.constraints = (FakeConstraint(),)
+    out1 = h._serialize(obj)
+    assert out1 is not None
+    assert len(out1["constraints"]) == 1
+
+    obj.constraints = ()
+    out2 = h._serialize(obj)
+    assert out2 is not None
+    assert out2["constraints"] == []
+
+    assert h._serialize(obj) is None  # already broadcast clear
 
 
 def test_animation_serialize_owner_explicit_clears_for_subareas():
