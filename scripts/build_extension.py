@@ -101,6 +101,63 @@ def download_wheels(platforms: list[str], python_versions: list[str]) -> None:
                     )
 
 
+def expand_abi3_wheels(python_versions: list[str]) -> None:
+    """Some packages (cryptography, pylibsrtp, ...) ship abi3 wheels:
+    a single binary that is forward-compatible across cpython 3.x.
+    `pip download --python-version 3.13 --abi cp313` happily resolves
+    these and returns the same `cp311-abi3` (or `cp39-abi3`) file for
+    every requested target.
+
+    Blender's extension installer, however, looks at the wheel file
+    NAME and rejects a `cp311-abi3` wheel when the embedded Python
+    is 3.13 — so packages-via-abi3 installs cleanly only on the
+    Python version that happens to match the lower bound encoded in
+    the filename.
+
+    Fix: detect those wheels and create renamed *copies* for every
+    python version we're bundling. The actual binary works on each
+    of them because abi3 is forward-compatible by definition; we're
+    only cooperating with Blender's filename-based picker.
+    """
+    if not WHEELS_DIR.exists():
+        return
+    abi3_re = re.compile(
+        r"^(?P<dist>.+?)-(?P<ver>[^-]+)-cp(?P<lower>\d+)-abi3-(?P<rest>.+\.whl)$"
+    )
+    for f in list(WHEELS_DIR.glob("*-abi3-*.whl")):
+        m = abi3_re.match(f.name)
+        if m is None:
+            continue
+        dist = m.group("dist")
+        ver = m.group("ver")
+        lower = int(m.group("lower"))   # e.g. 39 or 311
+        rest = m.group("rest")
+        # `lower` follows pip wheel-tag conventions: '39' = 3.9, '311'
+        # = 3.11. Treat anything < 100 as a single-digit minor.
+        lower_minor = lower % 10 if lower < 100 else lower % 100
+        for py_version in python_versions:
+            target_minor = int(py_version.split(".")[1])
+            if target_minor < lower_minor and lower < 100:
+                # abi3 wheel encodes "cpython >= 3.<lower_minor>"; if
+                # the requested target is older than that, skip.
+                continue
+            # Build the renamed target.
+            tag = f"cp3{target_minor}"
+            new_name = f"{dist}-{ver}-{tag}-{tag}-{rest}"
+            target = WHEELS_DIR / new_name
+            if target.exists():
+                continue
+            # Copy bytes (hardlink would be nicer but cross-fs unsafe).
+            target.write_bytes(f.read_bytes())
+            print(f"[abi3] {f.name} -> {new_name}")
+        # Remove the original abi3-tagged file so Blender's installer
+        # only sees the cleanly-tagged copies.
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
 def collect_wheel_paths() -> list[str]:
     if not WHEELS_DIR.exists():
         return []
@@ -236,6 +293,8 @@ def main() -> int:
 
     if not args.skip_download:
         download_wheels(platforms, python_versions)
+
+    expand_abi3_wheels(python_versions)
 
     wheels = collect_wheel_paths()
     if not wheels:
