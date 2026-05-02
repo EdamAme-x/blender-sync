@@ -145,7 +145,16 @@ class AnimationCategoryHandler:
     def _serialize_owner(self, owner, owner_type: str = "object") -> dict[str, Any] | None:
         ad = getattr(owner, "animation_data", None)
         if ad is None:
-            return None
+            # animation_data was cleared entirely (rare — typically
+            # via animation_data_clear() or undo of "make local").
+            # Emit a clear-op so peers drop their stale Action /
+            # drivers / NLA tracks. Apply path interprets the empty
+            # action/drivers/nla_tracks as "remove all".
+            return {
+                "owner": owner.name,
+                "owner_type": owner_type,
+                "clear": True,
+            }
         out: dict[str, Any] = {
             "owner": owner.name,
             "owner_type": owner_type,
@@ -161,8 +170,11 @@ class AnimationCategoryHandler:
         if tracks:
             out["nla_tracks"] = [_serialize_nla_track(t) for t in tracks]
 
-        if "action" not in out and "drivers" not in out and "nla_tracks" not in out:
-            return None
+        # Even when action / drivers / nla_tracks are all empty (e.g.
+        # the user just removed the last driver via undo), still emit
+        # the op so peers clear their stale state. The apply path
+        # treats missing keys as "no change in that sub-area" but
+        # honors empty arrays / None action explicitly.
         return out
 
     def apply(self, ops: list[dict[str, Any]]) -> None:
@@ -175,6 +187,15 @@ class AnimationCategoryHandler:
             owner_type = op.get("owner_type", "object")
             owner = _resolve_owner(bpy, owner_type, owner_name)
             if owner is None:
+                continue
+            if op.get("clear"):
+                # Sender's animation_data was cleared entirely. Peer
+                # mirrors that — drop the whole animation_data block.
+                try:
+                    if owner.animation_data is not None:
+                        owner.animation_data_clear()
+                except Exception:
+                    pass
                 continue
             if "action" in op:
                 self._apply_action(bpy, owner, op.get("action", {}))

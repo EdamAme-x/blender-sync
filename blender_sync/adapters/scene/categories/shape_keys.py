@@ -33,6 +33,14 @@ class ShapeKeysCategoryHandler:
     def __init__(self) -> None:
         self._sent_block_hashes: dict[tuple[str, str], str] = {}
 
+    def _forget_object_block_hashes(self, obj_name: str) -> None:
+        """Drop every cached (obj_name, *) entry. Called when the
+        object's shape-key stack is empty so a future recreate with
+        the same key block name doesn't suppress its coords."""
+        stale = [k for k in self._sent_block_hashes if k[0] == obj_name]
+        for k in stale:
+            self._sent_block_hashes.pop(k, None)
+
     def collect(self, ctx: DirtyContext) -> list[dict[str, Any]]:
         try:
             import bpy
@@ -57,6 +65,12 @@ class ShapeKeysCategoryHandler:
             # Object can hold shape keys but has none right now (e.g.
             # the user just removed the last one). Emit an empty
             # `blocks` op so peers clear their stale stack on apply.
+            #
+            # Wipe per-block hash cache for this object so that a
+            # later recreate-with-same-name doesn't get its coords
+            # suppressed by a stale cache hit and end up rebuilding
+            # peers as default blocks.
+            self._forget_object_block_hashes(obj.name)
             return {
                 "obj": obj.name,
                 "use_relative": True,
@@ -122,6 +136,25 @@ class ShapeKeysCategoryHandler:
             self._apply_object(bpy, obj, op)
 
     def _apply_object(self, bpy, obj, op: dict) -> None:
+        target_blocks = op.get("blocks") or []
+        if not target_blocks:
+            # Sender cleared all shape keys — peer must do the same.
+            # Drop the cached per-block hashes so a later recreate
+            # with the same names doesn't get coords suppressed.
+            self._forget_object_block_hashes(obj.name)
+            keys = obj.data.shape_keys
+            if keys is not None:
+                # Walk a copy because shape_key_remove mutates the
+                # collection. shape_key_remove handles Basis lastly;
+                # Blender forbids removing Basis while other blocks
+                # exist, so iterating twice handles that case too.
+                for kb in list(keys.key_blocks):
+                    try:
+                        obj.shape_key_remove(kb)
+                    except Exception:
+                        pass
+            return
+
         keys = obj.data.shape_keys
         if keys is None:
             try:
@@ -131,7 +164,6 @@ class ShapeKeysCategoryHandler:
                 return
 
         keys.use_relative = bool(op.get("use_relative", True))
-        target_blocks = op.get("blocks") or []
         target_names = {b["name"] for b in target_blocks}
 
         # Remove blocks not in target.

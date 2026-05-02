@@ -67,7 +67,11 @@ class ConstraintsCategoryHandler:
         return ops
 
     def _serialize(self, obj) -> dict[str, Any] | None:
-        if not obj.constraints:
+        # Always return an op (even with an empty constraints list)
+        # so that an undo step which cleared all constraints reaches
+        # peers. Apply rebuilds the stack from this list, so an empty
+        # list = "remove all constraints".
+        if not hasattr(obj, "constraints"):
             return None
         constraints = []
         for c in obj.constraints:

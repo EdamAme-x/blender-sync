@@ -44,8 +44,10 @@ class MaterialSlotsCategoryHandler:
             }
             for slot in obj.material_slots
         ]
-        if not slots:
-            return None
+        # Always return an op — empty `slots` means "remove all
+        # material slots", required for undo cases where the user
+        # cleared the slot list. apply path resizes the slot list
+        # down via obj.data.materials.pop, so an empty target works.
         return {"obj": obj.name, "slots": slots}
 
     def apply(self, ops: list[dict[str, Any]]) -> None:

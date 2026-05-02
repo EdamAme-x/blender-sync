@@ -1314,6 +1314,114 @@ def test_modifier_serialize_walks_nested_settings():
     assert "rna_type" not in deep
 
 
+def test_material_slots_serialize_with_empty_slots_emits_op():
+    """P2-22: when undo removes all material slots, the serializer
+    must still return an op (with empty slots list) so peers clear
+    their stack. Pre-fix returned None and peers retained slots."""
+    from blender_sync.adapters.scene.categories.material_slots import (
+        MaterialSlotsCategoryHandler,
+    )
+
+    class EmptyObj:
+        name = "Cube"
+        material_slots = ()
+
+    h = MaterialSlotsCategoryHandler()
+    out = h._serialize(EmptyObj())
+    assert out is not None
+    assert out["obj"] == "Cube"
+    assert out["slots"] == []
+
+
+def test_constraints_serialize_with_no_constraints_emits_op():
+    """P2-22: empty constraints stack must still be broadcast."""
+    from blender_sync.adapters.scene.categories.constraints import (
+        ConstraintsCategoryHandler,
+    )
+
+    class EmptyObj:
+        name = "Cube"
+        constraints = ()
+
+    h = ConstraintsCategoryHandler()
+    out = h._serialize(EmptyObj())
+    assert out is not None
+    assert out["obj"] == "Cube"
+    assert out["constraints"] == []
+
+
+def test_animation_serialize_owner_with_no_animation_data_emits_clear():
+    """P2-22: owner whose animation_data was cleared entirely must
+    emit a clear op so peers drop their stale Action/drivers/NLA."""
+    from blender_sync.adapters.scene.categories.animation import (
+        AnimationCategoryHandler,
+    )
+
+    class FakeOwner:
+        name = "Cube"
+        animation_data = None
+
+    h = AnimationCategoryHandler()
+    out = h._serialize_owner(FakeOwner(), owner_type="object")
+    assert out is not None
+    assert out["owner"] == "Cube"
+    assert out["owner_type"] == "object"
+    assert out["clear"] is True
+
+
+def test_animation_serialize_owner_with_empty_animation_data_emits_op():
+    """Owner with animation_data but no Action / drivers / NLA. Pre-
+    fix this returned None — now it emits the owner so the apply
+    path is invoked (and missing sub-keys mean "no change", so this
+    is effectively a probe op)."""
+    from blender_sync.adapters.scene.categories.animation import (
+        AnimationCategoryHandler,
+    )
+
+    class FakeAD:
+        action = None
+        drivers = ()
+        nla_tracks = ()
+
+    class FakeOwner:
+        name = "Cube"
+        animation_data = FakeAD()
+
+    h = AnimationCategoryHandler()
+    out = h._serialize_owner(FakeOwner(), owner_type="object")
+    assert out is not None
+    assert out["owner"] == "Cube"
+
+
+def test_shape_keys_empty_stack_clears_block_hash_cache():
+    """P2-21: when serializing an object with no shape keys (cleared
+    by Undo), the per-block hash cache must be wiped for that object,
+    otherwise a recreate-with-same-name would suppress its coords."""
+    from blender_sync.adapters.scene.categories.shape_keys import (
+        ShapeKeysCategoryHandler,
+    )
+
+    class FakeMeshData:
+        shape_keys = None
+
+    class FakeObj:
+        name = "Cube"
+        data = FakeMeshData()
+
+    h = ShapeKeysCategoryHandler()
+    # Seed the cache with stale entries for this object.
+    h._sent_block_hashes[("Cube", "Smile")] = "deadbeef"
+    h._sent_block_hashes[("Cube", "Frown")] = "cafebabe"
+    h._sent_block_hashes[("Other", "X")] = "feedface"
+
+    h._serialize(FakeObj())
+
+    # Cube entries gone, Other untouched.
+    assert ("Cube", "Smile") not in h._sent_block_hashes
+    assert ("Cube", "Frown") not in h._sent_block_hashes
+    assert ("Other", "X") in h._sent_block_hashes
+
+
 def test_particle_serialize_object_with_no_systems_emits_empty_op():
     """P2-18: an object that had particle systems removed must still
     serialize so apply can clear peer state. Pre-fix, _serialize_object
