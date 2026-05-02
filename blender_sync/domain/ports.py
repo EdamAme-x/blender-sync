@@ -56,6 +56,12 @@ class ISceneDirtyCollector(Protocol):
     def collect_dirty_ops(
         self, categories: Iterable[CategoryKind]
     ) -> list[tuple[CategoryKind, list[dict[str, Any]]]]: ...
+    def consume_undo_pending_force(self) -> bool:
+        """Returns True iff the user just performed an Undo or Redo
+        and the next outgoing tick should broadcast as force=True so
+        peers don't reject the rewound state via LWW. Resets the flag
+        on read."""
+        ...
 
 
 @runtime_checkable
@@ -71,7 +77,7 @@ class ISceneApplier(Protocol):
 class ISceneSnapshot(Protocol):
     """Full-state read for Force Push and Initial Snapshot."""
     def build_full_snapshot(
-        self,
+        self, *, initial_snapshot: bool = False,
     ) -> list[tuple[CategoryKind, list[dict[str, Any]]]]: ...
     def set_applying_remote(self, value: bool) -> None: ...
     def apply_ops(

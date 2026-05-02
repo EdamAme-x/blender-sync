@@ -100,11 +100,20 @@ _TRANSFORM_PROPS = (
 class VSEStripCategoryHandler:
     category_name = "vse_strip"
 
-    def __init__(self) -> None:
+    def __init__(self, logger: Any | None = None) -> None:
         # Per-scene last-sent hash. Suppresses re-sends when the Scene
         # depsgraph fires for unrelated reasons (frame change, render
         # tweaks) but the timeline content hasn't actually moved.
         self._sent_hash: dict[str, str] = {}
+        self._logger = logger
+
+    def _warn(self, msg: str, *args: Any) -> None:
+        if self._logger is None:
+            return
+        try:
+            self._logger.warning(msg, *args)
+        except Exception:
+            pass
 
     def collect(self, ctx: DirtyContext) -> list[dict[str, Any]]:
         if not ctx.vse_strip:
@@ -255,6 +264,14 @@ class VSEStripCategoryHandler:
             ref = _datablock_ref.try_ref(s.scene)
             if ref is not None:
                 out["scene_ref"] = ref
+        if stype == "MOVIECLIP" and getattr(s, "clip", None) is not None:
+            ref = _datablock_ref.try_ref(s.clip)
+            if ref is not None:
+                out["clip_ref"] = ref
+        if stype == "MASK" and getattr(s, "mask", None) is not None:
+            ref = _datablock_ref.try_ref(s.mask)
+            if ref is not None:
+                out["mask_ref"] = ref
         if hasattr(s, "scene_camera") and getattr(s, "scene_camera", None) is not None:
             ref = _datablock_ref.try_ref(s.scene_camera)
             if ref is not None:
@@ -285,10 +302,33 @@ class VSEStripCategoryHandler:
         except ImportError:
             return
         for op in ops:
-            scene = bpy.data.scenes.get(op.get("scene", "")) or bpy.context.scene
+            if "scene" in op:
+                scene_name = op.get("scene")
+                scene = (
+                    bpy.data.scenes.get(scene_name)
+                    if isinstance(scene_name, str) else None
+                )
+                if scene is None:
+                    self._warn("vse apply skipped: scene not found: %r", scene_name)
+                    continue
+            else:
+                scene = bpy.context.scene
             if scene is None:
                 continue
             self._apply_scene(bpy, scene, op)
+            # Cache the applied op's hash AFTER apply so the next
+            # collect sees "applied state == last sent state" and
+            # skips broadcasting it back. Without this, the depsgraph
+            # update triggered by our own apply marks the scene dirty
+            # and the resulting collect re-sends the same timeline,
+            # producing a ping-pong loop with peers. We still want a
+            # *local* edit that produces the SAME timeline shape as
+            # the remote (e.g. A → remote B → local A) to re-send,
+            # which works because the post-A hash equals the cached
+            # pre-A hash, not the just-applied B.
+            scene_name = getattr(scene, "name", None)
+            if isinstance(scene_name, str):
+                self._sent_hash[scene_name] = self._hash_op(op)
 
     def _apply_scene(self, bpy, scene, op: dict[str, Any]) -> None:
         active = bool(op.get("active", False))
@@ -391,6 +431,11 @@ class VSEStripCategoryHandler:
                     return None
                 return coll.new_image(name=name, filepath=fp,
                                       channel=ch, frame_start=fs)
+            if stype == "META":
+                # TODO: Rebuild child strips inside the meta once the wire
+                # format carries nested timelines. For now, preserve the
+                # meta shell instead of silently dropping it.
+                return coll.new_meta(name=name, channel=ch, frame_start=fs)
             if stype == "SCENE":
                 token = sd.get("scene_ref")
                 target_scene = (
@@ -400,6 +445,28 @@ class VSEStripCategoryHandler:
                     return None
                 return coll.new_scene(name=name, scene=target_scene,
                                       channel=ch, frame_start=fs)
+            if stype == "MOVIECLIP":
+                token = sd.get("clip_ref")
+                clip = _datablock_ref.resolve_ref(token) if token else None
+                if clip is None:
+                    self._warn(
+                        "vse apply skipped MOVIECLIP %r: clip ref missing",
+                        name,
+                    )
+                    return None
+                return coll.new_clip(name=name, clip=clip,
+                                     channel=ch, frame_start=fs)
+            if stype == "MASK":
+                token = sd.get("mask_ref")
+                mask = _datablock_ref.resolve_ref(token) if token else None
+                if mask is None:
+                    self._warn(
+                        "vse apply skipped MASK %r: mask ref missing",
+                        name,
+                    )
+                    return None
+                return coll.new_mask(name=name, mask=mask,
+                                     channel=ch, frame_start=fs)
             if stype in _ZERO_INPUT_EFFECTS:
                 return coll.new_effect(name=name, type=stype, channel=ch,
                                        frame_start=fs, length=length)
@@ -427,6 +494,7 @@ class VSEStripCategoryHandler:
         "filepath", "directory",
         "sound_path", "sound_name",
         "scene_ref", "scene_camera_ref",
+        "clip_ref", "mask_ref",
         "input_1", "input_2",
         "length",
         "transform",

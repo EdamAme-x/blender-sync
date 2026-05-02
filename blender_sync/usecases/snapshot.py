@@ -35,7 +35,7 @@ class SnapshotUseCase:
 
     def send_initial(self) -> None:
         try:
-            grouped = self._scene.build_full_snapshot()
+            grouped = self._scene.build_full_snapshot(initial_snapshot=True)
         except Exception as exc:
             self._logger.error("build_full_snapshot failed: %s", exc)
             return

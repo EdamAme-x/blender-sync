@@ -151,6 +151,15 @@ class Packet:
 
     @property
     def channel(self) -> ChannelKind:
+        # Force packets always ride the reliable channel regardless of
+        # the category's normal channel. A Force Push is a deliberate
+        # "make peers match my state" operation; sending its
+        # transform / pose / view3d state on the lossy fast lane
+        # defeats the purpose because those packets aren't ordered,
+        # aren't recorded for resend, and bypass force-recovery
+        # bookkeeping on the receiver.
+        if self.force:
+            return ChannelKind.RELIABLE
         return CATEGORY_TO_CHANNEL[self.category]
 
     def to_wire_dict(self) -> dict[str, Any]:

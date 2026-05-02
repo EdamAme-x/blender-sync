@@ -99,14 +99,26 @@ def test_force_packet_still_chained():
 
 
 def test_history_records_only_reliable():
+    """OutboundHistory must skip chain==0 (fast) packets entirely.
+
+    Reliable and fast packets now use independent seq counters, so
+    `fast.seq` and `reliable.seq` may collide on (1, 1); the test
+    instead recreates a fresh history per channel and checks the
+    reliable lookup hits while the history was never grown by the
+    fast packet.
+    """
     hist = OutboundHistory(capacity=10)
     b = PacketBuilder("me", SeqCounter())
     fast = b.build(CategoryKind.TRANSFORM, [{"n": "X"}], 1.0)
-    reliable = b.build(CategoryKind.MATERIAL, [{"mat": "M"}], 1.0)
     hist.record(fast)
+    # Fast packet has chain==0; record() must drop it silently.
+    assert len(list(hist.range(0, 999))) == 0
+
+    reliable = b.build(CategoryKind.MATERIAL, [{"mat": "M"}], 1.0)
     hist.record(reliable)
-    assert hist.get(fast.seq) is None
     assert hist.get(reliable.seq) is reliable
+    # Only the reliable one is in history.
+    assert len(list(hist.range(0, 999))) == 1
 
 
 def test_history_drops_oldest_at_capacity():

@@ -108,14 +108,48 @@ class ApplyRemotePacketUseCase:
 
         self._apply_payload(packet)
 
+        # After a force packet, any held-back reliable packets newer
+        # than the force seq may now be in-order against the realigned
+        # chain. Drain them now so apply order is force-then-followups.
+        if packet.force and packet.chain != 0:
+            self._drain_held_back(packet.author)
+
     def _chain_verified(self, packet: Packet) -> bool:
         """Returns True if the packet should be applied now. Side-effects:
-          - advances chain for in-order packets
-          - holds out-of-order packets and emits NACK
+          - advances chain for in-order reliable packets
+          - holds out-of-order reliable packets and emits NACK
           - drains held-back queue when in-order resumes
+
+        Fast (chain==0) packets travel on a separate seq counter (see
+        PacketBuilder) and are accepted unconditionally here — they do
+        NOT touch the reliable chain state, so they cannot interfere
+        with reliable seq tracking.
+
+        Force packets are special: they ride the reliable seq + chain on
+        the sender (so NACK/RESEND continuity is preserved), but the
+        whole point of a Force Push is to recover from a stale or
+        broken chain. We bypass chain verification and instead realign
+        the receiver's chain to the force packet's reported state. Any
+        held-back packets older than the force seq are obsolete and
+        discarded; later held-backs are drained if they line up.
         """
-        if packet.chain == 0 or packet.force:
-            # Fast / unreliable / force packets: bypass chain, but apply.
+        if packet.chain == 0:
+            return True
+
+        if packet.force:
+            st = self._state(packet.author)
+            if packet.seq <= st.last_verified_seq:
+                # Stale force RESEND that arrived after newer reliable
+                # traffic already advanced past it — applying the
+                # payload would silently revert the scene. Drop it
+                # entirely (chain stays intact, no apply).
+                self._logger.debug(
+                    "ignoring stale force seq=%d from %s "
+                    "(last_verified=%d)",
+                    packet.seq, packet.author, st.last_verified_seq,
+                )
+                return False
+            self._catch_up_to_force(packet)
             return True
 
         st = self._state(packet.author)
@@ -153,6 +187,40 @@ class ApplyRemotePacketUseCase:
         if last >= first:
             self._emit_nack(packet.author, first, last)
         return False
+
+    def _catch_up_to_force(self, packet: Packet) -> None:
+        """Realign receiver chain state to a force packet.
+
+        Force = "I'm authoritative; whatever you had, replace it." After
+        applying, expected_seq jumps to seq+1 and the chain rolling
+        state is restored from the force packet's chain field (low 16
+        bits = a, high 16 bits = b — same encoding as PacketChain.fold).
+        Held-back packets <= seq are now obsolete (they're either
+        already represented in the force snapshot or strictly older).
+        Newer held-backs are left in place; the caller drains them
+        AFTER the force payload is applied so the apply order matches
+        the seq order on the wire.
+
+        Caller must ensure `packet.seq > st.last_verified_seq` before
+        invoking this — stale force resends are filtered upstream in
+        `_chain_verified` because applying their payloads after newer
+        packets would revert scene state. The defensive guard below
+        protects against future misuse.
+        """
+        st = self._state(packet.author)
+        if packet.seq <= st.last_verified_seq:
+            # Should never happen given the upstream filter; refuse to
+            # rewind regardless.
+            return
+        st.expected_seq = packet.seq + 1
+        st.last_verified_seq = packet.seq
+        st.chain.a = packet.chain & 0xFFFF
+        st.chain.b = (packet.chain >> 16) & 0xFFFF
+        # Discard held-back entries that are now in the past relative
+        # to the force snapshot.
+        st.held_back = {
+            s: data for s, data in st.held_back.items() if s > packet.seq
+        }
 
     def _drain_held_back(self, author: str) -> None:
         st = self._state(author)

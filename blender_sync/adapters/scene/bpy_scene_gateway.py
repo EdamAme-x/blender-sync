@@ -21,7 +21,10 @@ from .categories.lattice import LatticeCategoryHandler
 from .categories.metaball import MetaballCategoryHandler
 from .categories.node_group import NodeGroupCategoryHandler
 from .categories.particle import ParticleCategoryHandler
-from .categories.point_cloud import PointCloudCategoryHandler
+from .categories.point_cloud import (
+    PointCloudCategoryHandler,
+    _BUILD_FULL_MAX_POINTS,
+)
 from .categories.sound import SoundCategoryHandler
 from .categories.texture import TextureCategoryHandler
 from .categories.view3d import View3DCategoryHandler
@@ -119,7 +122,7 @@ class BpySceneGateway(ISceneGateway):
             CategoryKind.CAMERA: CameraCategoryHandler(),
             CategoryKind.LIGHT: LightCategoryHandler(),
             CategoryKind.ANIMATION: AnimationCategoryHandler(),
-            CategoryKind.VSE_STRIP: VSEStripCategoryHandler(),
+            CategoryKind.VSE_STRIP: VSEStripCategoryHandler(logger=logger),
             CategoryKind.VIEW3D: View3DCategoryHandler(),
             # Tier 4: maintenance ops — must run last so deletion/rename
             # don't trip up references in earlier tiers.
@@ -128,6 +131,7 @@ class BpySceneGateway(ISceneGateway):
         }
 
         self._depsgraph_handler = self._make_depsgraph_handler()
+        self._undo_handler = self._make_undo_handler()
         self._mode_state: dict[str, str] = {}
         self._msgbus_owner = object()
         self._prev_visibility: dict[str, tuple[bool, bool, bool]] = {}
@@ -135,8 +139,22 @@ class BpySceneGateway(ISceneGateway):
         # update in O(1) instead of scanning bpy.data each call.
         self._shape_key_to_owner: dict[str, str] = {}
         self._action_to_users: dict[str, set[tuple[str, str]]] = {}
+        # Owners that *had* animation_data the last time we observed
+        # them. Required for Undo: if a Ctrl+Z step set
+        # animation_data to None on an owner, the live walk in
+        # _mark_all_dirty would skip them and the clear op would
+        # never reach peers. By remembering the previous set, the
+        # undo path can mark them and the serializer emits a clear.
+        self._previously_animated: set[tuple[str, str]] = set()
         self._cleanup_counter = 0
         self._cleanup_interval = 600
+        # Set when the user pressed Ctrl+Z / Ctrl+Shift+Z. SyncTick reads
+        # this flag, builds a force packet covering all dirty categories,
+        # and clears it. Reason: Blender's undo restores arbitrary
+        # bpy.data state — diffing against last-sent state is unreliable
+        # and slow, so we just authoritatively re-broadcast the new
+        # local state.
+        self._undo_pending_force = False
 
     # --- Domain port ---------------------------------------------------
 
@@ -155,6 +173,17 @@ class BpySceneGateway(ISceneGateway):
             return
         try:
             bpy.app.handlers.depsgraph_update_post.append(self._depsgraph_handler)
+            # Undo / Redo: when the user presses Ctrl+Z the bpy.data
+            # state is rewound. Without this hook the local Blender
+            # would diverge from peers (peers still hold the
+            # post-edit state). The handler marks every category
+            # dirty + flips the force flag so SyncTick re-broadcasts
+            # the rewound state authoritatively.
+            for hook in (
+                bpy.app.handlers.undo_post,
+                bpy.app.handlers.redo_post,
+            ):
+                hook.append(self._undo_handler)
             self._subscribe_msgbus(bpy)
             self._installed = True
             self._logger.info("scene listeners installed")
@@ -171,6 +200,12 @@ class BpySceneGateway(ISceneGateway):
         try:
             if self._depsgraph_handler in bpy.app.handlers.depsgraph_update_post:
                 bpy.app.handlers.depsgraph_update_post.remove(self._depsgraph_handler)
+            for hook in (
+                bpy.app.handlers.undo_post,
+                bpy.app.handlers.redo_post,
+            ):
+                if self._undo_handler in hook:
+                    hook.remove(self._undo_handler)
             try:
                 bpy.msgbus.clear_by_owner(self._msgbus_owner)
             except Exception:
@@ -284,11 +319,16 @@ class BpySceneGateway(ISceneGateway):
         except Exception as exc:
             self._logger.error("apply failed for %s: %s", category, exc)
 
-    def build_full_snapshot(self) -> list[tuple[CategoryKind, list[dict[str, Any]]]]:
+    def build_full_snapshot(
+        self, *, initial_snapshot: bool = False,
+    ) -> list[tuple[CategoryKind, list[dict[str, Any]]]]:
         out: list[tuple[CategoryKind, list[dict[str, Any]]]] = []
         for category, handler in self._handlers.items():
             try:
-                ops = handler.build_full()
+                if initial_snapshot and category is CategoryKind.POINT_CLOUD:
+                    ops = handler.build_full(max_points=_BUILD_FULL_MAX_POINTS)
+                else:
+                    ops = handler.build_full()
             except Exception as exc:
                 self._logger.error("build_full failed for %s: %s", category, exc)
                 continue
@@ -335,13 +375,15 @@ class BpySceneGateway(ISceneGateway):
 
         # Sound property toggles do not flow through depsgraph reliably
         # (Sound is a leaf ID with no evaluated graph involvement). Hook
-        # them here so use_memory_cache / use_mono edits propagate. The
+        # them here so filepath / cache / mono edits propagate. The
         # callback can't see *which* Sound changed, so we mark every
         # current Sound dirty — collect() then sends only the ones whose
         # serialized form differs (the dirty set is a hint, not a diff).
         sound_t = getattr(bpy.types, "Sound", None)
         if sound_t is not None:
-            for prop in ("use_memory_cache", "use_mono"):
+            for prop in ("filepath", "use_memory_cache", "use_mono"):
+                if not hasattr(sound_t, prop):
+                    continue
                 try:
                     bpy.msgbus.subscribe_rna(
                         key=(sound_t, prop),
@@ -392,6 +434,169 @@ class BpySceneGateway(ISceneGateway):
         if self._applying_remote:
             return
         self._tracker.mark_view3d()
+
+    def consume_undo_pending_force(self) -> bool:
+        """Returns True if an undo/redo just happened and the next sync
+        tick should broadcast as force=True. Resets the flag — caller
+        should arrange for the rebroadcast immediately."""
+        if not self._undo_pending_force:
+            return False
+        self._undo_pending_force = False
+        return True
+
+    def _make_undo_handler(self):
+        gateway = self
+
+        def _handler(scene, depsgraph=None):
+            # Don't echo our own apply path: if we're applying a remote
+            # packet right now, the rewind is the legitimate result of
+            # the remote's authoritative state, not a local user undo.
+            if gateway._applying_remote:
+                return
+            try:
+                import bpy
+            except ImportError:
+                return
+            # Mark every datablock as dirty so the next collect emits
+            # the post-undo state for every category. Force flag tells
+            # SyncTickUseCase to send these as force=True packets so
+            # peers don't reject them via LWW.
+            try:
+                gateway._mark_all_dirty(bpy)
+                gateway._undo_pending_force = True
+                gateway._logger.info(
+                    "undo/redo detected: scheduling force rebroadcast",
+                )
+            except Exception as exc:
+                gateway._logger.warning("undo handler failed: %s", exc)
+
+        return _handler
+
+    def _mark_all_dirty(self, bpy) -> None:
+        """Walk every tracked bpy.data collection and mark its members
+        dirty. Used by the undo handler — the trade-off for completeness
+        over a per-datablock diff is acceptable because undo is rare
+        and per-datablock diffs would need a snapshot of pre-undo
+        state."""
+        t = self._tracker
+        # Object-level tracker fields.
+        for o in bpy.data.objects:
+            t.mark_transform(o.name)
+            t.mark_visibility(o.name)
+            # Always mark Modifier when the object has a modifiers
+            # collection — even if it's currently empty. The handler
+            # serializes an empty list as "clear all modifiers", which
+            # is the right behavior when undo just removed the last
+            # modifier on the object. Pre-fix this `if len > 0` gate
+            # caused peers to retain a stale modifier stack.
+            if hasattr(o, "modifiers"):
+                t.mark_modifier(o.name, "")
+            if o.type == "ARMATURE":
+                t.mark_pose(o.name)
+            # Mark capability-based: an object that *had* particle
+            # systems / shape keys before the undo step but no longer
+            # has any must still be broadcast so peers clear their
+            # stale stack. Truthiness checks would skip those exact
+            # cases. The serializer emits empty lists for empties
+            # which the apply path interprets as "remove all".
+            if hasattr(o, "particle_systems"):
+                t.mark_particle(o.name)
+            data = getattr(o, "data", None)
+            if data is not None and hasattr(data, "shape_keys"):
+                t.mark_shape_keys(o.name)
+            # Mesh committed is keyed by the OBJECT name (not the mesh
+            # datablock name) because MeshCategoryHandler resolves via
+            # bpy.data.objects.get(name). Walk objects of type MESH
+            # here so a renamed object whose mesh datablock keeps the
+            # old name still gets its geometry rebroadcast.
+            if o.type == "MESH":
+                t.mark_mesh_committed(o.name)
+        # Datablock-level collections (NOT meshes — handled above by
+        # walking objects).
+        for name_attr, mark in (
+            ("materials", t.mark_material),
+            ("cameras", t.mark_camera),
+            ("lights", t.mark_light),
+            ("collections", t.mark_collection),
+            ("images", t.mark_image),
+            ("armatures", t.mark_armature),
+            ("node_groups", t.mark_node_group),
+            ("textures", t.mark_texture),
+            ("curves", t.mark_curve),
+            ("lattices", t.mark_lattice),
+            ("metaballs", t.mark_metaball),
+            ("sounds", t.mark_sound),
+        ):
+            coll = getattr(bpy.data, name_attr, None)
+            if coll is None:
+                continue
+            for db in coll:
+                try:
+                    mark(db.name)
+                except Exception:
+                    pass
+        # Newer 4.x / 5.x ID types — gated since some Blender builds
+        # don't expose them.
+        for name_attr, mark in (
+            ("volumes", t.mark_volume),
+            ("pointclouds", t.mark_point_cloud),
+        ):
+            coll = getattr(bpy.data, name_attr, None)
+            if coll is None:
+                continue
+            for db in coll:
+                try:
+                    mark(db.name)
+                except Exception:
+                    pass
+        # Grease Pencil v3 vs legacy.
+        for name_attr in ("grease_pencils_v3", "grease_pencils"):
+            coll = getattr(bpy.data, name_attr, None)
+            if coll is None:
+                continue
+            for db in coll:
+                try:
+                    t.mark_grease_pencil(db.name)
+                except Exception:
+                    pass
+        # Singletons.
+        t.mark_render()
+        t.mark_compositor()
+        t.mark_scene_world()
+        t.mark_view3d()
+        t.mark_vse_strip()
+        # Animation owners. Two groups must be marked:
+        #   1) live owners with `animation_data` (covers drivers-only
+        #      and NLA-only owners that the cached _action_to_users
+        #      reverse lookup misses because it requires ad.action).
+        #   2) owners that *previously* had animation_data but no
+        #      longer do — without this set, an undo step that
+        #      cleared animation_data is invisible to the live walk
+        #      and peers retain the stale Action / drivers / NLA.
+        live_animated: set[tuple[str, str]] = set()
+        for kind, attr in (
+            ("object", "objects"),
+            ("material", "materials"),
+            ("world", "worlds"),
+            ("camera", "cameras"),
+            ("light", "lights"),
+            ("armature", "armatures"),
+        ):
+            coll = getattr(bpy.data, attr, None)
+            if coll is None:
+                continue
+            for db in coll:
+                ad = getattr(db, "animation_data", None)
+                if ad is None:
+                    continue
+                t.mark_animation(f"{kind}:{db.name}")
+                live_animated.add((kind, db.name))
+        # Mark previously-animated owners that have since lost their
+        # animation_data — their clear op is what restores peer state.
+        for kind, name in self._previously_animated - live_animated:
+            t.mark_animation(f"{kind}:{name}")
+        # Refresh the previous-animated set for the next undo cycle.
+        self._previously_animated = live_animated
 
     def _make_depsgraph_handler(self):
         gateway = self
@@ -557,9 +762,20 @@ class BpySceneGateway(ISceneGateway):
                 # objects in hand (cheap; same loop as other live work).
                 fresh_sk: dict[str, str] = {}
                 fresh_action: dict[str, set[tuple[str, str]]] = {}
+                # Snapshot of "owners with animation_data" observed
+                # this depsgraph cycle. The undo path reads this so
+                # that an undo step which clears animation_data on a
+                # newly-animated owner can still emit a clear-op
+                # (otherwise the very first undo after a fresh
+                # animation_data_create would see "live=None,
+                # previous=empty" and broadcast nothing).
+                fresh_animated: set[tuple[str, str]] = set()
 
                 def _record_action_user(kind: str, ad, owner_name: str) -> None:
-                    if ad is not None and ad.action is not None:
+                    if ad is None:
+                        return
+                    fresh_animated.add((kind, owner_name))
+                    if ad.action is not None:
                         fresh_action.setdefault(ad.action.name, set()).add(
                             (kind, owner_name)
                         )
@@ -602,6 +818,15 @@ class BpySceneGateway(ISceneGateway):
 
                 gateway._shape_key_to_owner = fresh_sk
                 gateway._action_to_users = fresh_action
+                # Union with the existing snapshot so that an owner
+                # which already lost its animation_data (e.g. via
+                # operator) is still remembered for the next undo
+                # cycle. The undo walk diffs `_previously_animated`
+                # vs. live to emit clear-ops, so removing entries
+                # eagerly here would defeat that path.
+                gateway._previously_animated = (
+                    gateway._previously_animated | fresh_animated
+                )
 
                 gateway._cleanup_counter += 1
                 if gateway._cleanup_counter >= gateway._cleanup_interval:

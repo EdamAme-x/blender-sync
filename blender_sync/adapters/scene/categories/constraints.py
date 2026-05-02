@@ -51,6 +51,15 @@ def _serialize_value(value: Any) -> Any:
 class ConstraintsCategoryHandler:
     category_name = "constraints"
 
+    def __init__(self) -> None:
+        # Per-object "last observed constraint count" — bumped from
+        # both serialize (outgoing) and apply (incoming). See
+        # MaterialSlotsCategoryHandler for the rationale: a serialize-
+        # only counter would suppress legitimate clear-ops after the
+        # local user empties a stack received from a peer, leaving
+        # that peer with stale constraints.
+        self._last_seen_count: dict[str, int] = {}
+
     def collect(self, ctx: DirtyContext) -> list[dict[str, Any]]:
         try:
             import bpy
@@ -67,7 +76,16 @@ class ConstraintsCategoryHandler:
         return ops
 
     def _serialize(self, obj) -> dict[str, Any] | None:
-        if not obj.constraints:
+        if not hasattr(obj, "constraints"):
+            return None
+        cur_n = len(obj.constraints)
+        # Skip the empty clear-op for objects whose constraint stack
+        # has always been empty on our side — broadcasting it would
+        # destroy peers' constraints for objects that just happen to
+        # share a name. Once we've sent a non-empty list, a later
+        # empty list IS a real "user cleared the stack" event and
+        # must propagate.
+        if cur_n == 0 and self._last_seen_count.get(obj.name, 0) == 0:
             return None
         constraints = []
         for c in obj.constraints:
@@ -89,6 +107,7 @@ class ConstraintsCategoryHandler:
                 if ser is not None:
                     cd["props"][attr] = ser
             constraints.append(cd)
+        self._last_seen_count[obj.name] = len(constraints)
         return {"obj": obj.name, "constraints": constraints}
 
     def apply(self, ops: list[dict[str, Any]]) -> None:
@@ -97,10 +116,17 @@ class ConstraintsCategoryHandler:
         except ImportError:
             return
         for op in ops:
-            obj = bpy.data.objects.get(op.get("obj", ""))
+            obj_name = op.get("obj", "")
+            obj = bpy.data.objects.get(obj_name)
             if obj is None or not hasattr(obj, "constraints"):
                 continue
-            self._apply_object(bpy, obj, op.get("constraints") or [])
+            target = op.get("constraints") or []
+            # Mirror the serialize-time bookkeeping so a subsequent
+            # local clear of these received constraints emits an
+            # empty op instead of being treated as "first-time
+            # empty" and silently suppressed.
+            self._last_seen_count[obj_name] = len(target)
+            self._apply_object(bpy, obj, target)
 
     def _apply_object(self, bpy, obj, constraints: list[dict]) -> None:
         # Tear down + rebuild for deterministic ordering.

@@ -3,6 +3,9 @@ plus the SyncFilters.enabled_categories() central source-of-truth.
 """
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 from blender_sync.domain.entities import (
     CATEGORY_TO_CHANNEL,
     CategoryKind,
@@ -142,6 +145,144 @@ class _FakeSnap:
     render = False
     compositor = False
     scene_world = False
+
+
+class _FakePointAttrData:
+    def __init__(self, n: int, prop: str):
+        self.n = n
+        self.prop = prop
+
+    def __len__(self):
+        return self.n
+
+    def __iter__(self):
+        if self.prop == "vector":
+            for _ in range(self.n):
+                yield SimpleNamespace(vector=(1.0, 2.0, 3.0))
+        else:
+            for _ in range(self.n):
+                yield SimpleNamespace(value=0.5)
+
+    def foreach_get(self, key, buf):
+        assert key == self.prop
+        try:
+            if self.prop == "vector":
+                buf[:] = 1.0
+            else:
+                buf[:] = 0.5
+            return
+        except Exception:
+            pass
+        value = 1.0 if self.prop == "vector" else 0.5
+        for i in range(len(buf)):
+            buf[i] = value
+
+
+class _FakePointAttr:
+    def __init__(self, n: int, prop: str):
+        self.data = _FakePointAttrData(n, prop)
+
+
+class _FakePointAttrs:
+    def __init__(self, n: int):
+        self._d = {
+            "position": _FakePointAttr(n, "vector"),
+            "radius": _FakePointAttr(n, "value"),
+        }
+
+    def get(self, k):
+        return self._d.get(k)
+
+
+class _FakePoints:
+    def __init__(self, n: int):
+        self.n = n
+
+    def __len__(self):
+        return self.n
+
+
+class _FakePointCloud:
+    def __init__(self, name: str, n: int):
+        self.name = name
+        self.points = _FakePoints(n)
+        self.attributes = _FakePointAttrs(n)
+
+
+class _FakeSceneMap:
+    def __init__(self, scenes):
+        self._scenes = list(scenes)
+        self._by_name = {s.name: s for s in self._scenes}
+
+    def __iter__(self):
+        return iter(self._scenes)
+
+    def get(self, name):
+        return self._by_name.get(name)
+
+
+class _FakeVSEScene:
+    def __init__(self, name: str, collection=None, strips_all=None):
+        self.name = name
+        self._collection = collection
+        self._strips_all = list(strips_all or [])
+        self.sequence_editor = None
+        self.clear_count = 0
+        self.create_count = 0
+
+    def sequence_editor_clear(self):
+        self.clear_count += 1
+        self.sequence_editor = None
+
+    def sequence_editor_create(self):
+        self.create_count += 1
+        collection = self._collection if self._collection is not None else []
+        self.sequence_editor = SimpleNamespace(
+            show_overlay_frame=False,
+            strips=collection,
+            sequences=[],
+            strips_all=self._strips_all,
+            sequences_all=self._strips_all,
+        )
+
+
+class _FakeVSECreatedStrip:
+    def __init__(self, name: str, stype: str):
+        self.name = name
+        self.type = stype
+        self.channel = 0
+        self.frame_start = 0
+        self.transform = None
+
+
+class _FakeVSECollection:
+    def __init__(self):
+        self.calls = []
+        self.created = []
+
+    def _make(self, method: str, name: str, stype: str, *args):
+        strip = _FakeVSECreatedStrip(name, stype)
+        self.calls.append((method, name, *args))
+        self.created.append(strip)
+        return strip
+
+    def new_meta(self, name, channel, frame_start):
+        return self._make("new_meta", name, "META", channel, frame_start)
+
+    def new_clip(self, name, clip, channel, frame_start):
+        return self._make("new_clip", name, "MOVIECLIP", clip, channel, frame_start)
+
+    def new_mask(self, name, mask, channel, frame_start):
+        return self._make("new_mask", name, "MASK", mask, channel, frame_start)
+
+
+def _install_fake_vse_bpy(monkeypatch, scenes, active_scene):
+    fake_bpy = SimpleNamespace(
+        data=SimpleNamespace(scenes=_FakeSceneMap(scenes)),
+        context=SimpleNamespace(scene=active_scene),
+    )
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+    return fake_bpy
 
 
 def test_camera_handler_no_bpy_graceful():
@@ -353,27 +494,108 @@ def test_point_cloud_serialize_uses_attribute_api():
     assert len(out["radii"]) == 4
 
 
-def test_point_cloud_build_full_truncates_oversize():
+def test_point_cloud_serialize_truncates_oversize_when_limit_passed():
     from blender_sync.adapters.scene.categories.point_cloud import (
         PointCloudCategoryHandler,
         _BUILD_FULL_MAX_POINTS,
     )
 
-    class FakePoints:
-        def __init__(self, n): self.n = n
-        def __len__(self): return self.n
-
-    class FakePC:
-        def __init__(self, name, n):
-            self.name = name
-            self.points = FakePoints(n)
-
     h = PointCloudCategoryHandler()
-    out = h._serialize(FakePC("Big", _BUILD_FULL_MAX_POINTS + 1),
+    out = h._serialize(_FakePointCloud("Big", _BUILD_FULL_MAX_POINTS + 1),
                        max_points=_BUILD_FULL_MAX_POINTS)
     assert out["truncated"] is True
     assert "positions" not in out
     assert "radii" not in out
+
+
+def test_point_cloud_serialize_limit_is_inclusive_not_truncated():
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+        _BUILD_FULL_MAX_POINTS,
+    )
+
+    h = PointCloudCategoryHandler()
+    out = h._serialize(
+        _FakePointCloud("Limit", _BUILD_FULL_MAX_POINTS),
+        max_points=_BUILD_FULL_MAX_POINTS,
+    )
+    assert out["count"] == _BUILD_FULL_MAX_POINTS
+    assert "truncated" not in out
+    assert len(out["positions"]) == _BUILD_FULL_MAX_POINTS * 3
+    assert len(out["radii"]) == _BUILD_FULL_MAX_POINTS
+
+
+def test_point_cloud_serialize_none_limit_sends_100k_points():
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+        _BUILD_FULL_MAX_POINTS,
+    )
+
+    h = PointCloudCategoryHandler()
+    pc = _FakePointCloud("Big", 100_000)
+    full = h._serialize(pc, max_points=None)
+    truncated = h._serialize(pc, max_points=_BUILD_FULL_MAX_POINTS)
+
+    assert full["count"] == 100_000
+    assert "truncated" not in full
+    assert len(full["positions"]) == 300_000
+    assert len(full["radii"]) == 100_000
+    assert truncated["truncated"] is True
+    assert "positions" not in truncated
+
+
+def test_point_cloud_build_full_default_is_unbounded_for_force_sync(monkeypatch):
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        PointCloudCategoryHandler,
+        _BUILD_FULL_MAX_POINTS,
+    )
+
+    fake_bpy = SimpleNamespace(
+        data=SimpleNamespace(pointclouds=[
+            _FakePointCloud("Big", _BUILD_FULL_MAX_POINTS + 1),
+        ]),
+    )
+    monkeypatch.setitem(sys.modules, "bpy", fake_bpy)
+
+    h = PointCloudCategoryHandler()
+    full = h.build_full()
+    bounded = h.build_full(max_points=_BUILD_FULL_MAX_POINTS)
+
+    assert full[0]["count"] == _BUILD_FULL_MAX_POINTS + 1
+    assert "truncated" not in full[0]
+    assert len(full[0]["positions"]) == (_BUILD_FULL_MAX_POINTS + 1) * 3
+    assert bounded[0]["truncated"] is True
+    assert "positions" not in bounded[0]
+
+
+def test_gateway_only_bounds_point_cloud_for_initial_snapshot():
+    from blender_sync.adapters.scene.bpy_scene_gateway import BpySceneGateway
+    from blender_sync.adapters.scene.categories.point_cloud import (
+        _BUILD_FULL_MAX_POINTS,
+    )
+    from tests.fakes.logger import RecordingLogger
+
+    class FakePointCloudHandler:
+        def __init__(self):
+            self.calls: list[int | None] = []
+
+        def build_full(self, max_points=None):
+            self.calls.append(max_points)
+            return [{"name": "Big"}]
+
+    gateway = BpySceneGateway(RecordingLogger(), DirtyTracker())
+    handler = FakePointCloudHandler()
+    gateway._handlers = {CategoryKind.POINT_CLOUD: handler}
+
+    assert gateway.build_full_snapshot() == [
+        (CategoryKind.POINT_CLOUD, [{"name": "Big"}]),
+    ]
+    assert handler.calls == [None]
+
+    assert gateway.build_full_snapshot(initial_snapshot=True) == [
+        (CategoryKind.POINT_CLOUD, [{"name": "Big"}]),
+    ]
+    assert handler.calls == [None, _BUILD_FULL_MAX_POINTS]
 
 
 def test_dirty_tracker_carries_volume_point_cloud():
@@ -446,6 +668,259 @@ def test_vse_strip_hash_dedupe():
     assert d1 == d2
     assert d1 != h._hash_op({"scene": "Scene", "active": True,
                               "strips": [{"name": "S1"}]})
+
+
+def test_vse_remote_apply_caches_applied_hash_so_return_to_local_a_resends(monkeypatch):
+    """P2-6 + P2-17 contract:
+
+    - After applying a remote op, the cache must reflect *that*
+      remote op's shape so the receiver doesn't immediately echo it
+      back (P2-17 ping-pong fix).
+    - But a subsequent local edit that produces a different shape —
+      including reverting to the prior local A — must still re-send
+      (P2-6 round-trip use case).
+    """
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    class S(_FakeSnap):
+        vse_strip = True
+
+    class FakeStrip:
+        def __init__(self, name: str):
+            self.name = name
+            self.type = "COLOR"
+            self.channel = 1
+            self.frame_start = 1
+            self.frame_final_duration = 10
+            self.transform = None
+
+    def set_timeline(scene, names):
+        strips = [FakeStrip(name) for name in names]
+        scene.sequence_editor = SimpleNamespace(
+            show_overlay_frame=False,
+            strips_all=strips,
+            sequences_all=strips,
+        )
+
+    scene = _FakeVSEScene("Scene")
+    set_timeline(scene, ["A"])
+    _install_fake_vse_bpy(monkeypatch, [scene], scene)
+
+    h = VSEStripCategoryHandler()
+    ctx = DirtyContext(S())
+    first = h.collect(ctx)
+    assert first
+    # Same local state — dedupe.
+    assert h.collect(ctx) == []
+
+    # Remote applies a different timeline ("active=False" / no strips).
+    remote_op = {"scene": "Scene", "active": False, "strips": []}
+    h.apply([remote_op])
+    # Cache now reflects the *remote* op's hash. We don't immediately
+    # re-broadcast because the local depsgraph dirty event (which
+    # we'd see in real Blender right after our apply) collects
+    # against the same shape.
+    assert "Scene" in h._sent_hash
+    cached_after_apply = h._sent_hash["Scene"]
+    assert cached_after_apply == h._hash_op(remote_op)
+
+    # Local user reverts to timeline A. Hash differs from the cached
+    # remote op, so collect re-emits.
+    set_timeline(scene, ["A"])
+    resend = h.collect(ctx)
+    assert resend == first
+
+
+def test_vse_remote_apply_does_not_immediately_rebroadcast(monkeypatch):
+    """P2-17: after a remote apply, an immediate collect for the same
+    state must NOT re-emit. Otherwise peers ping-pong identical
+    timelines indefinitely."""
+    from blender_sync.adapters.scene.categories.base import DirtyContext
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    class S(_FakeSnap):
+        vse_strip = True
+
+    scene = _FakeVSEScene("Scene")
+    # Match the remote op shape: active=False, no strips.
+    scene.sequence_editor = None
+    _install_fake_vse_bpy(monkeypatch, [scene], scene)
+
+    h = VSEStripCategoryHandler()
+    ctx = DirtyContext(S())
+
+    remote_op = {"scene": "Scene", "active": False, "strips": []}
+    h.apply([remote_op])
+
+    # The very next collect — simulating depsgraph dirty after our
+    # apply — must NOT re-emit the just-applied state.
+    out = h.collect(ctx)
+    assert out == []
+
+
+def test_vse_apply_missing_named_scene_does_not_clear_active(monkeypatch):
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+    from tests.fakes.logger import RecordingLogger
+
+    active = _FakeVSEScene("Active")
+    logger = RecordingLogger()
+    _install_fake_vse_bpy(monkeypatch, [active], active)
+
+    h = VSEStripCategoryHandler(logger=logger)
+    h.apply([{"scene": "RenamedAway", "active": False, "strips": []}])
+
+    assert active.clear_count == 0
+    assert active.create_count == 0
+    assert any(
+        level == "WARN" and "RenamedAway" in text
+        for level, text in logger.records
+    )
+
+
+def test_vse_apply_matching_scene_clears_named_scene_only(monkeypatch):
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    active = _FakeVSEScene("Active")
+    target = _FakeVSEScene("Timeline")
+    _install_fake_vse_bpy(monkeypatch, [active, target], active)
+
+    h = VSEStripCategoryHandler()
+    h.apply([{"scene": "Timeline", "active": False, "strips": []}])
+
+    assert target.clear_count == 1
+    assert active.clear_count == 0
+
+
+def test_vse_apply_without_scene_key_uses_context_fallback(monkeypatch):
+    from blender_sync.adapters.scene.categories.vse_strip import (
+        VSEStripCategoryHandler,
+    )
+
+    active = _FakeVSEScene("Active")
+    _install_fake_vse_bpy(monkeypatch, [active], active)
+
+    h = VSEStripCategoryHandler()
+    h.apply([{"active": False, "strips": []}])
+
+    assert active.clear_count == 1
+
+
+def test_vse_serialize_movieclip_and_mask_refs(monkeypatch):
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+
+    class FakeStrip:
+        def __init__(self, stype: str, attr: str, target):
+            self.name = f"{stype}_Strip"
+            self.type = stype
+            self.channel = 2
+            self.frame_start = 11
+            self.frame_final_duration = 23
+            self.transform = None
+            setattr(self, attr, target)
+
+    clip = SimpleNamespace(name="ClipData")
+    mask = SimpleNamespace(name="MaskData")
+
+    def fake_ref(value):
+        return f"ref:{value.name}"
+
+    monkeypatch.setattr(vsm._datablock_ref, "try_ref", fake_ref)
+
+    h = vsm.VSEStripCategoryHandler()
+    clip_out = h._serialize_strip(FakeStrip("MOVIECLIP", "clip", clip))
+    mask_out = h._serialize_strip(FakeStrip("MASK", "mask", mask))
+
+    assert clip_out["clip_ref"] == "ref:ClipData"
+    assert clip_out["length"] == 23
+    assert mask_out["mask_ref"] == "ref:MaskData"
+    assert mask_out["length"] == 23
+
+
+def test_vse_apply_recreates_meta_movieclip_and_mask(monkeypatch):
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+
+    clip = SimpleNamespace(name="ClipData")
+    mask = SimpleNamespace(name="MaskData")
+    refs = {"clip-token": clip, "mask-token": mask}
+    monkeypatch.setattr(vsm._datablock_ref, "resolve_ref", refs.get)
+
+    coll = _FakeVSECollection()
+    scene = _FakeVSEScene("Scene", collection=coll)
+    h = vsm.VSEStripCategoryHandler()
+
+    h._apply_scene(None, scene, {
+        "active": True,
+        "strips": [
+            {"type": "META", "name": "Meta", "channel": 1, "frame_start": 3},
+            {
+                "type": "MOVIECLIP",
+                "name": "ClipStrip",
+                "channel": 2,
+                "frame_start": 4,
+                "clip_ref": "clip-token",
+            },
+            {
+                "type": "MASK",
+                "name": "MaskStrip",
+                "channel": 3,
+                "frame_start": 5,
+                "mask_ref": "mask-token",
+            },
+        ],
+    })
+
+    assert scene.clear_count == 1
+    assert scene.create_count == 1
+    assert coll.calls == [
+        ("new_meta", "Meta", 1, 3),
+        ("new_clip", "ClipStrip", clip, 2, 4),
+        ("new_mask", "MaskStrip", mask, 3, 5),
+    ]
+
+
+def test_vse_apply_skips_unresolved_movieclip_and_mask(monkeypatch):
+    from blender_sync.adapters.scene.categories import vse_strip as vsm
+    from tests.fakes.logger import RecordingLogger
+
+    monkeypatch.setattr(vsm._datablock_ref, "resolve_ref", lambda token: None)
+    coll = _FakeVSECollection()
+    scene = _FakeVSEScene("Scene", collection=coll)
+    logger = RecordingLogger()
+    h = vsm.VSEStripCategoryHandler(logger=logger)
+
+    h._apply_scene(None, scene, {
+        "active": True,
+        "strips": [
+            {
+                "type": "MOVIECLIP",
+                "name": "MissingClip",
+                "channel": 1,
+                "frame_start": 1,
+                "clip_ref": "missing-clip",
+            },
+            {
+                "type": "MASK",
+                "name": "MissingMask",
+                "channel": 2,
+                "frame_start": 1,
+                "mask_ref": "missing-mask",
+            },
+        ],
+    })
+
+    assert coll.calls == []
+    warnings = [text for level, text in logger.records if level == "WARN"]
+    assert any("MOVIECLIP" in text and "MissingClip" in text for text in warnings)
+    assert any("MASK" in text and "MissingMask" in text for text in warnings)
 
 
 def test_vse_effect_constants_match_blender_5():
@@ -651,6 +1126,74 @@ def test_sound_serialize_picks_filepath():
     assert out["props"]["use_mono"] is False
 
 
+def test_gateway_sound_msgbus_subscribes_filepath():
+    from blender_sync.adapters.scene.bpy_scene_gateway import BpySceneGateway
+    from tests.fakes.logger import RecordingLogger
+
+    class MsgBus:
+        def __init__(self):
+            self.keys = []
+
+        def subscribe_rna(self, key, owner, args, notify):
+            self.keys.append(key)
+
+    class SoundType:
+        filepath = object()
+        use_memory_cache = object()
+        use_mono = object()
+
+    class Types:
+        RenderSettings = type("RenderSettings", (), {})
+        Scene = type("Scene", (), {})
+        View3DShading = type("View3DShading", (), {})
+        Sound = SoundType
+
+    fake_bpy = SimpleNamespace(types=Types, msgbus=MsgBus())
+    gateway = BpySceneGateway(RecordingLogger(), DirtyTracker())
+
+    gateway._subscribe_msgbus(fake_bpy)
+
+    sound_props = {
+        prop for cls, prop in fake_bpy.msgbus.keys
+        if cls is SoundType
+    }
+    assert {"filepath", "use_memory_cache", "use_mono"} <= sound_props
+
+
+def test_gateway_sound_msgbus_skips_missing_filepath_property():
+    from blender_sync.adapters.scene.bpy_scene_gateway import BpySceneGateway
+    from tests.fakes.logger import RecordingLogger
+
+    class MsgBus:
+        def __init__(self):
+            self.keys = []
+
+        def subscribe_rna(self, key, owner, args, notify):
+            self.keys.append(key)
+
+    class SoundType:
+        use_memory_cache = object()
+        use_mono = object()
+
+    class Types:
+        RenderSettings = type("RenderSettings", (), {})
+        Scene = type("Scene", (), {})
+        View3DShading = type("View3DShading", (), {})
+        Sound = SoundType
+
+    fake_bpy = SimpleNamespace(types=Types, msgbus=MsgBus())
+    gateway = BpySceneGateway(RecordingLogger(), DirtyTracker())
+
+    gateway._subscribe_msgbus(fake_bpy)
+
+    sound_props = [
+        prop for cls, prop in fake_bpy.msgbus.keys
+        if cls is SoundType
+    ]
+    assert "filepath" not in sound_props
+    assert set(sound_props) == {"use_memory_cache", "use_mono"}
+
+
 def test_vse_apply_blacklist_rejects_input_keys():
     """`input_1` / `input_2` are wire-only; the apply loop must not
     setattr them onto the strip (they're populated via the new_effect
@@ -663,6 +1206,8 @@ def test_vse_apply_blacklist_rejects_input_keys():
     assert "input_1" in blacklist
     assert "input_2" in blacklist
     assert "length" in blacklist
+    assert "clip_ref" in blacklist
+    assert "mask_ref" in blacklist
     assert "transform" in blacklist  # handled via dedicated branch
 
 
@@ -767,6 +1312,419 @@ def test_modifier_serialize_walks_nested_settings():
     assert deep["gravity"] == 1.0
     assert deep["wind"] == 0.5
     assert "rna_type" not in deep
+
+
+def test_material_slots_serialize_empty_only_after_having_sent_non_empty():
+    """P2-22 + P2-26: empty `slots` is a clear-op that wipes peers.
+    To avoid wiping peers' state on a plain transform of an
+    un-slotted object, the empty op only fires once we've actually
+    sent a non-empty list before. First-time-empty is suppressed."""
+    from blender_sync.adapters.scene.categories.material_slots import (
+        MaterialSlotsCategoryHandler,
+    )
+
+    class FakeSlot:
+        def __init__(self, mat: str | None = None, link: str = "DATA"):
+            self.material = (
+                type("M", (), {"name": mat})() if mat else None
+            )
+            self.link = link
+
+    class TogglingObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.material_slots = ()
+
+    obj = TogglingObj()
+    h = MaterialSlotsCategoryHandler()
+
+    # First observation: empty slots, never sent → suppress.
+    assert h._serialize(obj) is None
+
+    # User adds a slot → emit.
+    obj.material_slots = (FakeSlot(mat="Mat"),)
+    out1 = h._serialize(obj)
+    assert out1 is not None
+    assert len(out1["slots"]) == 1
+
+    # User clears all slots → emit empty (clear-op).
+    obj.material_slots = ()
+    out2 = h._serialize(obj)
+    assert out2 is not None
+    assert out2["slots"] == []
+
+    # Subsequent observation while still empty → suppress again
+    # (we already broadcast the clear).
+    assert h._serialize(obj) is None
+
+
+def test_material_slots_apply_seeds_seen_count_so_local_clear_propagates():
+    """P2-29: when peer sends non-empty slots, apply must record the
+    count. Otherwise a local clear of those received slots looks
+    like 'first-time empty' (cur=0 / cached=0) and is suppressed,
+    leaving the peer with stale slots.
+    """
+    import sys, types
+    fake_bpy = types.ModuleType("bpy")
+
+    class FakeSlot:
+        def __init__(self, mat=None, link="DATA"):
+            self.material = (
+                type("M", (), {"name": mat})() if mat else None
+            )
+            self.link = link
+
+    class FakeData:
+        materials = []  # not used in dedupe path
+    class FakeObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.material_slots = ()
+            self.data = FakeData()
+
+    obj = FakeObj()
+    fake_bpy.data = types.SimpleNamespace(
+        objects=type("L", (), {"get": staticmethod(
+            lambda name: obj if name == "Cube" else None
+        )})(),
+        materials=type("L2", (), {"get": staticmethod(lambda n: None),
+                                  "new": staticmethod(lambda name: None)})(),
+    )
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.categories.material_slots import (
+            MaterialSlotsCategoryHandler,
+        )
+        h = MaterialSlotsCategoryHandler()
+        # Peer sent us 2 slots — apply records the count even though
+        # we never serialized them ourselves.
+        h.apply([{"obj": "Cube", "slots": [
+            {"material": "M1", "link": "DATA"},
+            {"material": "M2", "link": "DATA"},
+        ]}])
+        assert h._last_seen_count["Cube"] == 2
+
+        # Local user clears the slots. Now serialize must emit the
+        # empty clear-op (NOT suppress it) so the original peer
+        # mirrors the deletion.
+        obj.material_slots = ()
+        out = h._serialize(obj)
+        assert out is not None
+        assert out["slots"] == []
+    finally:
+        sys.modules.pop("bpy", None)
+
+
+def test_constraints_apply_seeds_seen_count_so_local_clear_propagates():
+    """P2-29: same contract for constraints."""
+    import sys, types
+    fake_bpy = types.ModuleType("bpy")
+
+    class FakeMod:
+        pass
+
+    class FakeObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.constraints = type(
+                "Coll", (list,),
+                {
+                    "new": lambda self, type: FakeMod(),
+                    "remove": lambda self, c: None,
+                }
+            )()
+
+    obj = FakeObj()
+    fake_bpy.data = types.SimpleNamespace(
+        objects=type("L", (), {"get": staticmethod(
+            lambda name: obj if name == "Cube" else None
+        )})(),
+    )
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.categories.constraints import (
+            ConstraintsCategoryHandler,
+        )
+        h = ConstraintsCategoryHandler()
+        # Peer sent 1 constraint via apply.
+        h.apply([{"obj": "Cube", "constraints": [
+            {"name": "L1", "type": "LIMIT_LOCATION", "props": {}}
+        ]}])
+        assert h._last_seen_count["Cube"] == 1
+
+        # Local user clears constraints; serialize must emit empty
+        # clear-op so peers mirror it.
+        obj.constraints = type("Coll2", (list,), {})()
+        out = h._serialize(obj)
+        assert out is not None
+        assert out["constraints"] == []
+    finally:
+        sys.modules.pop("bpy", None)
+
+
+def test_constraints_serialize_empty_only_after_having_sent_non_empty():
+    """P2-22 + P2-26: empty constraints == "remove all" on apply.
+    Suppress the first-time-empty case so a plain transform of an
+    unconstrained object doesn't wipe peers' constraints for an
+    object that just shares a name."""
+    from blender_sync.adapters.scene.categories.constraints import (
+        ConstraintsCategoryHandler,
+    )
+
+    class FakeConstraint:
+        def __init__(self, name: str = "Limit"):
+            self.name = name
+            self.type = "LIMIT_LOCATION"
+
+    class TogglingObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.constraints = ()
+
+    obj = TogglingObj()
+    h = ConstraintsCategoryHandler()
+
+    assert h._serialize(obj) is None  # first observation, empty → suppress
+
+    obj.constraints = (FakeConstraint(),)
+    out1 = h._serialize(obj)
+    assert out1 is not None
+    assert len(out1["constraints"]) == 1
+
+    obj.constraints = ()
+    out2 = h._serialize(obj)
+    assert out2 is not None
+    assert out2["constraints"] == []
+
+    assert h._serialize(obj) is None  # already broadcast clear
+
+
+def test_animation_serialize_owner_explicit_clears_for_subareas():
+    """P2-23: when an owner has animation_data but a sub-area
+    (action / drivers / nla_tracks) was cleared, the wire op must
+    contain that sub-area as None / [] explicitly so apply removes
+    the stale state. Pre-fix the empty sub-area key was just
+    omitted, which apply treats as 'no change'."""
+    from blender_sync.adapters.scene.categories.animation import (
+        AnimationCategoryHandler,
+    )
+
+    class FakeAD:
+        action = None        # was cleared
+        drivers = ()         # was cleared
+        nla_tracks = ()      # was cleared
+
+    class FakeOwner:
+        name = "Cube"
+        animation_data = FakeAD()
+
+    h = AnimationCategoryHandler()
+    out = h._serialize_owner(FakeOwner(), owner_type="object")
+    assert out is not None
+    # Each sub-area is present with an explicit empty value.
+    assert out["action"] is None
+    assert out["drivers"] == []
+    assert out["nla_tracks"] == []
+
+
+def test_animation_serialize_owner_with_no_animation_data_emits_clear():
+    """P2-22: owner whose animation_data was cleared entirely must
+    emit a clear op so peers drop their stale Action/drivers/NLA."""
+    from blender_sync.adapters.scene.categories.animation import (
+        AnimationCategoryHandler,
+    )
+
+    class FakeOwner:
+        name = "Cube"
+        animation_data = None
+
+    h = AnimationCategoryHandler()
+    out = h._serialize_owner(FakeOwner(), owner_type="object")
+    assert out is not None
+    assert out["owner"] == "Cube"
+    assert out["owner_type"] == "object"
+    assert out["clear"] is True
+
+
+def test_animation_serialize_owner_with_empty_animation_data_emits_op():
+    """Owner with animation_data but no Action / drivers / NLA. Pre-
+    fix this returned None — now it emits the owner so the apply
+    path is invoked (and missing sub-keys mean "no change", so this
+    is effectively a probe op)."""
+    from blender_sync.adapters.scene.categories.animation import (
+        AnimationCategoryHandler,
+    )
+
+    class FakeAD:
+        action = None
+        drivers = ()
+        nla_tracks = ()
+
+    class FakeOwner:
+        name = "Cube"
+        animation_data = FakeAD()
+
+    h = AnimationCategoryHandler()
+    out = h._serialize_owner(FakeOwner(), owner_type="object")
+    assert out is not None
+    assert out["owner"] == "Cube"
+
+
+def test_shape_keys_clear_removes_basis_last(monkeypatch):
+    """P3-25: when applying a clear op, non-Basis blocks must be
+    removed before Basis. Blender refuses to remove Basis while
+    other blocks still reference it as their relative_key, so a
+    naive iteration order leaves Basis behind."""
+    import types
+    import sys
+
+    fake_bpy = types.ModuleType("bpy")
+
+    removal_order: list[str] = []
+
+    class FakeKB:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeKeys:
+        def __init__(self):
+            self.basis = FakeKB("Basis")
+            self.smile = FakeKB("Smile")
+            self.frown = FakeKB("Frown")
+            self.key_blocks = [self.basis, self.smile, self.frown]
+            self.use_relative = True
+
+        @property
+        def reference_key(self):
+            return self.basis
+
+    class FakeMesh:
+        def __init__(self):
+            self.shape_keys = FakeKeys()
+
+    class FakeObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.data = FakeMesh()
+
+        def shape_key_remove(self, kb):
+            # Mirror Blender: refuse to remove Basis while non-Basis
+            # blocks remain.
+            keys = self.data.shape_keys
+            if keys is None:
+                return
+            if (
+                kb is keys.reference_key
+                and any(k is not keys.reference_key for k in keys.key_blocks)
+            ):
+                raise RuntimeError("cannot remove Basis while others exist")
+            removal_order.append(kb.name)
+            keys.key_blocks = [k for k in keys.key_blocks if k is not kb]
+            if not keys.key_blocks:
+                self.data.shape_keys = None
+
+        def shape_key_add(self, name):
+            keys = self.data.shape_keys or FakeKeys()
+            self.data.shape_keys = keys
+            return keys.basis
+
+    fake_bpy.data = types.SimpleNamespace(objects={"Cube": FakeObj()})
+    fake_bpy.data.objects = {"Cube": FakeObj()}
+
+    class _Lookup:
+        def __init__(self, m): self._m = m
+        def get(self, name): return self._m.get(name)
+
+    fake_bpy.data = types.SimpleNamespace(
+        objects=_Lookup({"Cube": FakeObj()}),
+    )
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.categories.shape_keys import (
+            ShapeKeysCategoryHandler,
+        )
+        h = ShapeKeysCategoryHandler()
+        h.apply([{
+            "obj": "Cube",
+            "use_relative": True,
+            "blocks": [],   # clear
+        }])
+        # Basis must be removed last.
+        assert removal_order[-1] == "Basis"
+        assert set(removal_order) == {"Basis", "Smile", "Frown"}
+    finally:
+        sys.modules.pop("bpy", None)
+
+
+def test_shape_keys_empty_stack_clears_block_hash_cache():
+    """P2-21: when serializing an object with no shape keys (cleared
+    by Undo), the per-block hash cache must be wiped for that object,
+    otherwise a recreate-with-same-name would suppress its coords."""
+    from blender_sync.adapters.scene.categories.shape_keys import (
+        ShapeKeysCategoryHandler,
+    )
+
+    class FakeMeshData:
+        shape_keys = None
+
+    class FakeObj:
+        name = "Cube"
+        data = FakeMeshData()
+
+    h = ShapeKeysCategoryHandler()
+    # Seed the cache with stale entries for this object.
+    h._sent_block_hashes[("Cube", "Smile")] = "deadbeef"
+    h._sent_block_hashes[("Cube", "Frown")] = "cafebabe"
+    h._sent_block_hashes[("Other", "X")] = "feedface"
+
+    h._serialize(FakeObj())
+
+    # Cube entries gone, Other untouched.
+    assert ("Cube", "Smile") not in h._sent_block_hashes
+    assert ("Cube", "Frown") not in h._sent_block_hashes
+    assert ("Other", "X") in h._sent_block_hashes
+
+
+def test_particle_serialize_object_with_no_systems_emits_empty_op():
+    """P2-18: an object that had particle systems removed must still
+    serialize so apply can clear peer state. Pre-fix, _serialize_object
+    returned None for empty particle_systems and the dirty tick
+    emitted nothing."""
+    from blender_sync.adapters.scene.categories.particle import (
+        ParticleCategoryHandler,
+    )
+
+    class EmptyObj:
+        name = "Cube"
+        particle_systems = ()  # falsy
+
+    h = ParticleCategoryHandler()
+    out = h._serialize_object(EmptyObj())
+    assert out is not None
+    assert out["obj"] == "Cube"
+    assert out["systems"] == []
+
+
+def test_shape_keys_serialize_with_no_keys_emits_empty_blocks():
+    """P2-18: an object whose shape_keys is None (e.g. all removed by
+    Undo) must serialize an empty blocks op so peers clear their
+    stack."""
+    from blender_sync.adapters.scene.categories.shape_keys import (
+        ShapeKeysCategoryHandler,
+    )
+
+    class FakeMeshData:
+        shape_keys = None
+
+    class FakeObj:
+        name = "Cube"
+        data = FakeMeshData()
+
+    h = ShapeKeysCategoryHandler()
+    out = h._serialize(FakeObj())
+    assert out is not None
+    assert out["obj"] == "Cube"
+    assert out["blocks"] == []
 
 
 def test_particle_settings_serializes_refs_and_deep():

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from ..domain.entities import CategoryKind, Session, SessionStatus, SyncConfig
+from ..domain.entities import (
+    CategoryKind, Session, SessionStatus, SyncConfig,
+)
 from ..domain.policies.packet_builder import OutboundHistory, PacketBuilder
 from ..domain.ports import (
     IAsyncRunner,
@@ -51,6 +53,20 @@ class SyncTickUseCase:
             self._logger.error("collect_dirty_ops failed: %s", exc)
             return
 
+        # Consume the undo flag BEFORE the empty-batch early return.
+        # If we returned early without consuming it, an undo whose
+        # categories happen to be all filtered off (or whose ops were
+        # absorbed by hash dedupe) would leave the flag set, and the
+        # next unrelated reliable edit would go out as force=True,
+        # silently overwriting newer peer state.
+        force_this_tick = False
+        try:
+            force_this_tick = bool(self._scene.consume_undo_pending_force())
+        except Exception as exc:
+            self._logger.debug(
+                "consume_undo_pending_force unavailable: %s", exc,
+            )
+
         if not grouped:
             return
 
@@ -58,7 +74,19 @@ class SyncTickUseCase:
         for category, ops in grouped:
             if not ops:
                 continue
-            packet = self._builder.build(category, ops, ts)
+            # Pass force_this_tick through unchanged for every
+            # category. PacketBuilder/Packet now promote force=True
+            # to the reliable chain regardless of the category's
+            # nominal channel (P2-28), so a force packet for
+            # TRANSFORM/POSE/VIEW3D rides the ordered, history-backed
+            # path and is no longer susceptible to lossy reordering.
+            # An earlier guard here stripped force on FAST categories
+            # to avoid late arrivals rewinding peers, but with the
+            # new routing that guard would just drop undo ops
+            # entirely if the FAST packet were lost in flight.
+            packet = self._builder.build(
+                category, ops, ts, force=force_this_tick,
+            )
             try:
                 data = self._codec.encode(packet)
             except Exception as exc:
@@ -68,6 +96,11 @@ class SyncTickUseCase:
                 self._history.record(packet)
             self._async_runner.run_coroutine(
                 self._transport.send(packet.channel, data)
+            )
+        if force_this_tick:
+            self._logger.info(
+                "broadcasted post-undo state as %d force packets",
+                len(grouped),
             )
 
     def _enabled_categories(self) -> list[CategoryKind]:
