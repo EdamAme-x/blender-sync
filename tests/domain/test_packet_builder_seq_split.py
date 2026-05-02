@@ -167,6 +167,57 @@ def test_control_packets_do_not_consume_reliable_seq_or_chain():
     assert ctrl2.seq == 2
 
 
+def test_force_packet_for_fast_category_rides_reliable_chain():
+    """P2-28: Force Push of TRANSFORM/POSE/VIEW3D state must be
+    routed via the reliable chain, not the lossy FAST lane. Without
+    this, force packets for those categories ride chain==0 +
+    unreliable seq and bypass the receiver's force-catch-up + stale-
+    resend logic.
+
+    Contract:
+      - Packet.channel returns RELIABLE for force=True (overrides
+        the category's nominal channel).
+      - PacketBuilder.build with force=True consumes the reliable
+        seq counter and computes a non-zero chain even on FAST
+        categories.
+    """
+    from blender_sync.domain.entities import ChannelKind
+
+    rel_seq = SeqCounter()
+    fast_seq = SeqCounter()
+    b = PacketBuilder("me", seq=rel_seq, unreliable_seq=fast_seq)
+
+    # Normal transform — FAST lane, chain=0.
+    p_normal = b.build(CategoryKind.TRANSFORM, [{"n": "Cube"}], 1.0)
+    assert p_normal.channel is ChannelKind.FAST
+    assert p_normal.chain == 0
+
+    # Force transform — reliable lane, non-zero chain.
+    p_force = b.build(CategoryKind.TRANSFORM, [{"n": "Cube"}], 2.0,
+                      force=True)
+    assert p_force.force is True
+    assert p_force.channel is ChannelKind.RELIABLE
+    assert p_force.chain != 0
+    # Reliable counter advanced for the force packet.
+    assert rel_seq.current == 1
+    # Unreliable counter unchanged for the force packet.
+    assert fast_seq.current == 1   # only p_normal consumed it
+
+
+def test_force_packet_for_pose_and_view3d_also_reliable():
+    """Same contract for POSE and VIEW3D — these are FAST categories
+    used during interactive playback / shading flips, but a Force
+    Push must still send them reliably."""
+    from blender_sync.domain.entities import ChannelKind
+
+    b = PacketBuilder("me", SeqCounter())
+    for cat in (CategoryKind.POSE, CategoryKind.VIEW3D):
+        p = b.build(cat, [{"obj": "Arm"}], 1.0, force=True)
+        assert p.force is True
+        assert p.channel is ChannelKind.RELIABLE, f"{cat} stayed FAST"
+        assert p.chain != 0, f"{cat} has no chain"
+
+
 def test_force_after_control_does_not_wedge():
     """End-to-end: send 3 control packets then a force packet. Receiver
     must accept the force packet without NACK'ing missing control

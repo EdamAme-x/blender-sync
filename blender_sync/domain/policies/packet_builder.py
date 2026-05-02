@@ -87,8 +87,19 @@ class PacketBuilder:
         # would drift and the next force/reliable packet would NACK a
         # control seq that was never going to fill the gap. Treat
         # CONTROL as out-of-band: separate seq counter, no chain.
+        #
+        # Force packets always ride the reliable chain regardless of
+        # their category's nominal channel. A Force Push is the
+        # recovery primitive — it MUST be ordered and record-able so
+        # the receiver's force-catch-up + stale-resend logic apply.
+        # If we left forced FAST packets on the lossy lane, the
+        # transform / pose / view3d state in a Force Push would skip
+        # all of that protection.
         on_reliable_chain = (
-            CATEGORY_TO_CHANNEL[category] is ChannelKind.RELIABLE
+            (
+                CATEGORY_TO_CHANNEL[category] is ChannelKind.RELIABLE
+                or force
+            )
             and category is not CategoryKind.CONTROL
         )
         if on_reliable_chain:
