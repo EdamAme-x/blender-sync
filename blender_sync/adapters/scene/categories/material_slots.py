@@ -22,12 +22,20 @@ class MaterialSlotsCategoryHandler:
     category_name = "material_slots"
 
     def __init__(self) -> None:
-        # Per-object "last sent slot count" — used to suppress the
-        # empty-slot clear-op when the object never had slots in the
-        # first place. Without this guard, every transform of an
-        # un-slotted object would broadcast `slots: []` and wipe
-        # peers that locally hold slots for the same name.
-        self._last_sent_count: dict[str, int] = {}
+        # Per-object "last observed slot count" — covers BOTH outgoing
+        # serialize and incoming apply. We need to suppress the
+        # empty-slot clear-op only when the object has never had
+        # slots from any source, otherwise:
+        #   - serialize-only update misses the case where peer sent
+        #     us slots, we received them, then local user cleared
+        #     them. If we don't bump the counter on apply, our
+        #     subsequent serialize sees cur=0/last=0 and suppresses
+        #     the legitimate clear-op, leaving the original peer
+        #     stuck on the stale stack.
+        # Counter is touched whenever a non-empty op is observed
+        # (collect or apply); only the empty-with-no-prior case is
+        # suppressed.
+        self._last_seen_count: dict[str, int] = {}
 
     def collect(self, ctx: DirtyContext) -> list[dict[str, Any]]:
         try:
@@ -59,9 +67,9 @@ class MaterialSlotsCategoryHandler:
         # slots for un-slotted objects on our side. Once we've sent
         # a non-empty list, the next empty list IS a real "user
         # cleared the stack" event and must propagate.
-        if cur_n == 0 and self._last_sent_count.get(obj.name, 0) == 0:
+        if cur_n == 0 and self._last_seen_count.get(obj.name, 0) == 0:
             return None
-        self._last_sent_count[obj.name] = cur_n
+        self._last_seen_count[obj.name] = cur_n
         return {"obj": obj.name, "slots": slots}
 
     def apply(self, ops: list[dict[str, Any]]) -> None:
@@ -70,10 +78,16 @@ class MaterialSlotsCategoryHandler:
         except ImportError:
             return
         for op in ops:
-            obj = bpy.data.objects.get(op.get("obj", ""))
+            obj_name = op.get("obj", "")
+            obj = bpy.data.objects.get(obj_name)
             if obj is None or not hasattr(obj, "material_slots"):
                 continue
             target_slots = op.get("slots") or []
+            # Record the post-apply slot count so a subsequent local
+            # clear of these received slots correctly emits an empty
+            # clear-op (instead of being suppressed as "first-time
+            # empty").
+            self._last_seen_count[obj_name] = len(target_slots)
             self._apply_slots(bpy, obj, target_slots)
 
     def _apply_slots(self, bpy, obj, target_slots: list) -> None:

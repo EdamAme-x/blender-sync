@@ -1358,6 +1358,110 @@ def test_material_slots_serialize_empty_only_after_having_sent_non_empty():
     assert h._serialize(obj) is None
 
 
+def test_material_slots_apply_seeds_seen_count_so_local_clear_propagates():
+    """P2-29: when peer sends non-empty slots, apply must record the
+    count. Otherwise a local clear of those received slots looks
+    like 'first-time empty' (cur=0 / cached=0) and is suppressed,
+    leaving the peer with stale slots.
+    """
+    import sys, types
+    fake_bpy = types.ModuleType("bpy")
+
+    class FakeSlot:
+        def __init__(self, mat=None, link="DATA"):
+            self.material = (
+                type("M", (), {"name": mat})() if mat else None
+            )
+            self.link = link
+
+    class FakeData:
+        materials = []  # not used in dedupe path
+    class FakeObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.material_slots = ()
+            self.data = FakeData()
+
+    obj = FakeObj()
+    fake_bpy.data = types.SimpleNamespace(
+        objects=type("L", (), {"get": staticmethod(
+            lambda name: obj if name == "Cube" else None
+        )})(),
+        materials=type("L2", (), {"get": staticmethod(lambda n: None),
+                                  "new": staticmethod(lambda name: None)})(),
+    )
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.categories.material_slots import (
+            MaterialSlotsCategoryHandler,
+        )
+        h = MaterialSlotsCategoryHandler()
+        # Peer sent us 2 slots — apply records the count even though
+        # we never serialized them ourselves.
+        h.apply([{"obj": "Cube", "slots": [
+            {"material": "M1", "link": "DATA"},
+            {"material": "M2", "link": "DATA"},
+        ]}])
+        assert h._last_seen_count["Cube"] == 2
+
+        # Local user clears the slots. Now serialize must emit the
+        # empty clear-op (NOT suppress it) so the original peer
+        # mirrors the deletion.
+        obj.material_slots = ()
+        out = h._serialize(obj)
+        assert out is not None
+        assert out["slots"] == []
+    finally:
+        sys.modules.pop("bpy", None)
+
+
+def test_constraints_apply_seeds_seen_count_so_local_clear_propagates():
+    """P2-29: same contract for constraints."""
+    import sys, types
+    fake_bpy = types.ModuleType("bpy")
+
+    class FakeMod:
+        pass
+
+    class FakeObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.constraints = type(
+                "Coll", (list,),
+                {
+                    "new": lambda self, type: FakeMod(),
+                    "remove": lambda self, c: None,
+                }
+            )()
+
+    obj = FakeObj()
+    fake_bpy.data = types.SimpleNamespace(
+        objects=type("L", (), {"get": staticmethod(
+            lambda name: obj if name == "Cube" else None
+        )})(),
+    )
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.categories.constraints import (
+            ConstraintsCategoryHandler,
+        )
+        h = ConstraintsCategoryHandler()
+        # Peer sent 1 constraint via apply.
+        h.apply([{"obj": "Cube", "constraints": [
+            {"name": "L1", "type": "LIMIT_LOCATION", "props": {}}
+        ]}])
+        assert h._last_seen_count["Cube"] == 1
+
+        # Local user clears constraints; serialize must emit empty
+        # clear-op so peers mirror it.
+        obj.constraints = type("Coll2", (list,), {})()
+        out = h._serialize(obj)
+        assert out is not None
+        assert out["constraints"] == []
+    finally:
+        sys.modules.pop("bpy", None)
+
+
 def test_constraints_serialize_empty_only_after_having_sent_non_empty():
     """P2-22 + P2-26: empty constraints == "remove all" on apply.
     Suppress the first-time-empty case so a plain transform of an
