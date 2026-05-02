@@ -558,10 +558,27 @@ class BpySceneGateway(ISceneGateway):
         t.mark_scene_world()
         t.mark_view3d()
         t.mark_vse_strip()
-        # Animation owners — fanned out from existing reverse lookup.
-        for action_name, users in self._action_to_users.items():
-            for kind, owner in users:
-                t.mark_animation(f"{kind}:{owner}")
+        # Animation owners. The cached `_action_to_users` only records
+        # owners with an active Action — drivers-only / NLA-only owners
+        # never landed there. Walk the live datablocks here so a force
+        # rebroadcast carries every animation-bearing owner regardless
+        # of what's on `ad.action` right now.
+        for kind, attr in (
+            ("object", "objects"),
+            ("material", "materials"),
+            ("world", "worlds"),
+            ("camera", "cameras"),
+            ("light", "lights"),
+            ("armature", "armatures"),
+        ):
+            coll = getattr(bpy.data, attr, None)
+            if coll is None:
+                continue
+            for db in coll:
+                ad = getattr(db, "animation_data", None)
+                if ad is None:
+                    continue
+                t.mark_animation(f"{kind}:{db.name}")
 
     def _make_depsgraph_handler(self):
         gateway = self

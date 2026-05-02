@@ -54,14 +54,12 @@ class SyncTickUseCase:
             self._logger.error("collect_dirty_ops failed: %s", exc)
             return
 
-        if not grouped:
-            return
-
-        # If the local user just pressed Ctrl+Z / Ctrl+Shift+Z, the
-        # gateway raised an undo flag and pre-marked every category
-        # dirty. Build this batch as force=True so peers accept the
-        # rewound state instead of rejecting it via LWW (their last
-        # seen ts is newer than the post-undo state).
+        # Consume the undo flag BEFORE the empty-batch early return.
+        # If we returned early without consuming it, an undo whose
+        # categories happen to be all filtered off (or whose ops were
+        # absorbed by hash dedupe) would leave the flag set, and the
+        # next unrelated reliable edit would go out as force=True,
+        # silently overwriting newer peer state.
         force_this_tick = False
         try:
             force_this_tick = bool(self._scene.consume_undo_pending_force())
@@ -69,6 +67,9 @@ class SyncTickUseCase:
             self._logger.debug(
                 "consume_undo_pending_force unavailable: %s", exc,
             )
+
+        if not grouped:
+            return
 
         ts = self._clock.now()
         for category, ops in grouped:

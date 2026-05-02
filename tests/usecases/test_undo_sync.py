@@ -147,6 +147,31 @@ def test_undo_force_skipped_when_applying_remote():
     assert scene.undo_pending_force is True   # not consumed
 
 
+def test_undo_flag_consumed_even_when_grouped_is_empty():
+    """P2-19: if undo fires but the dirty batch is empty (e.g. all
+    categories filtered off, or hash-deduped), the flag must still be
+    consumed. Otherwise a later unrelated reliable edit would
+    silently go out as force=True and overwrite newer peer state."""
+    uc, scene, transport, session = _make_uc()
+
+    # Empty filter = no enabled categories → grouped will be empty.
+    scene.undo_pending_force = True
+    # No dirty added — collect returns []
+    uc.tick(session)
+
+    # The flag must have been read despite the empty batch.
+    assert scene.undo_force_consumed == 1
+    assert scene.undo_pending_force is False
+    assert transport.sent == []   # nothing to send
+
+    # Now a normal reliable edit arrives. It must NOT be force=True.
+    scene.dirty[CategoryKind.MATERIAL] = [{"mat": "M"}]
+    uc.tick(session)
+    decoded = [_JsonCodec().decode(d) for _, d in transport.sent]
+    assert len(decoded) == 1
+    assert decoded[0].force is False
+
+
 def test_undo_force_strips_force_flag_on_fast_categories():
     """P1-14: undo broadcasts must NOT mark FAST-channel packets
     (TRANSFORM/POSE/VIEW3D) as force=True. Those packets ride the
@@ -501,6 +526,70 @@ def test_real_gateway_undo_handler_marks_objects_with_empty_shape_keys():
         gw._undo_handler(scene=None, depsgraph=None)
 
         assert "JustClearedSK" in gw._tracker.shape_keys
+    finally:
+        sys.modules.pop("bpy", None)
+
+
+def test_real_gateway_undo_handler_marks_driver_only_animation_owners():
+    """P2-20: an owner with animation_data but no active Action (e.g.
+    drivers-only or NLA-only) must still appear in the animation
+    dirty set after Undo. The cached _action_to_users reverse lookup
+    only sees Action-bearing owners, so we walk live datablocks
+    directly for the undo path."""
+    import types
+    import sys
+
+    fake_bpy = types.ModuleType("bpy")
+
+    # Object with animation_data but ad.action is None — pure driver
+    # / NLA case.
+    class FakeAnimData:
+        action = None
+        drivers = ()
+        nla_tracks = ()
+
+    class DriverObj:
+        name = "DriverDriven"
+        type = "MESH"
+        modifiers = ()
+        particle_systems = ()
+        data = None
+        animation_data = FakeAnimData()
+
+    # Material with the same shape.
+    class DriverMat:
+        name = "DriverMat"
+        animation_data = FakeAnimData()
+
+    fake_bpy.data = types.SimpleNamespace(
+        objects=[DriverObj()],
+        materials=[DriverMat()],
+        meshes=[], cameras=[], lights=[], collections=[],
+        images=[], armatures=[], node_groups=[], textures=[],
+        curves=[], lattices=[], metaballs=[], sounds=[],
+        worlds=[],
+        volumes=None, pointclouds=None,
+        grease_pencils=None, grease_pencils_v3=None,
+    )
+    fake_bpy.types = types.SimpleNamespace()
+    fake_bpy.app = types.SimpleNamespace(
+        background=False, handlers=types.SimpleNamespace(),
+    )
+    fake_bpy.context = types.SimpleNamespace(scene=None, screen=None)
+    fake_bpy.msgbus = types.SimpleNamespace()
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.bpy_scene_gateway import (
+            BpySceneGateway,
+        )
+        from blender_sync.domain.policies.dirty_tracker import DirtyTracker
+
+        gw = BpySceneGateway(logger=RecordingLogger(), tracker=DirtyTracker())
+        gw._undo_handler(scene=None, depsgraph=None)
+
+        # Both driver-only owners must be in the animation dirty set.
+        assert "object:DriverDriven" in gw._tracker.animations
+        assert "material:DriverMat" in gw._tracker.animations
     finally:
         sys.modules.pop("bpy", None)
 
