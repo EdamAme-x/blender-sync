@@ -53,7 +53,15 @@ def _extract_translated_literals(source: str) -> set[str]:
     return out
 
 
-def _extract_bl_label_and_description(source: str) -> set[str]:
+def _extract_bl_labels(source: str) -> set[str]:
+    """Operator/Panel `bl_label` only — those are the button text the
+    user actually clicks, so they belong in the JA dict.
+
+    `bl_description` (= tooltip) is intentionally NOT required to have
+    a JA entry: the rest of Blender keeps tooltips in English by
+    default and over-translating them clutters the UI without adding
+    meaning for users who already read English technical terms.
+    """
     tree = ast.parse(source)
     out: set[str] = set()
 
@@ -63,9 +71,7 @@ def _extract_bl_label_and_description(source: str) -> set[str]:
                 if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1):
                     continue
                 tgt = stmt.targets[0]
-                if not (isinstance(tgt, ast.Name) and tgt.id in (
-                    "bl_label", "bl_description"
-                )):
+                if not (isinstance(tgt, ast.Name) and tgt.id == "bl_label"):
                     continue
                 value = stmt.value
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
@@ -142,12 +148,16 @@ def test_session_status_values_have_japanese_entries(ja_dict):
 
 
 def test_operator_bl_labels_have_japanese_entries(ja_dict):
+    """bl_label = button text the user clicks. Must have a JA entry.
+    bl_description = tooltip; intentionally exempt — Blender shows
+    tooltips in English by default and translating them adds noise
+    for technical users."""
     operators_path = PKG / "presentation" / "operators.py"
     source = operators_path.read_text(encoding="utf-8")
-    labels = _extract_bl_label_and_description(source)
+    labels = _extract_bl_labels(source)
     missing = [m for m in labels if not _key_present(ja_dict, m)]
     assert not missing, (
-        "Operator bl_label/bl_description missing JA:\n"
+        "Operator bl_label missing JA:\n"
         + "\n".join(f"  {repr(m)}" for m in missing)
     )
 
@@ -157,7 +167,7 @@ def test_translation_dict_has_no_orphan_keys(ja_dict):
     for ui in UI_FILES:
         src = ui.read_text(encoding="utf-8")
         referenced.update(_extract_translated_literals(src))
-        referenced.update(_extract_bl_label_and_description(src))
+        referenced.update(_extract_bl_labels(src))
         referenced.update(_extract_property_names(src))
     referenced.update(s.value for s in SessionStatus)
     referenced.update(c.value for c in CategoryKind)

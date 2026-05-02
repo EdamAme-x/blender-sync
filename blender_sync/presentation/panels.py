@@ -8,7 +8,7 @@ from bpy.types import Panel
 class SYNC_PT_main(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "Sync"
+    bl_category = "Blender Sync"
     bl_label = "Blender Sync"
     bl_idname = "SYNC_PT_main"
 
@@ -52,25 +52,18 @@ class SYNC_PT_main(Panel):
         if state.status == "live":
             layout.separator()
             metrics = layout.box()
-            metrics.label(text=_("Connection Metrics"), icon="INFO")
+            metrics.label(text="Connection Metrics", icon="INFO")
             mc = metrics.column(align=True)
-            mc.label(
-                text=_("Peers: %d") % int(state.peer_count)
-            )
-            mc.label(
-                text=_("Latency: %.1f ms") % float(state.latency_ms)
-            )
-            mc.label(
-                text=_("Bandwidth: %.1f KB/s") % float(state.bandwidth_kbps)
-            )
+            mc.label(text="Peers: %d" % int(state.peer_count))
+            mc.label(text="Latency: %.1f ms" % float(state.latency_ms))
+            mc.label(text="Bandwidth: %.1f KB/s" % float(state.bandwidth_kbps))
 
             layout.separator()
             box5 = layout.box()
-            box5.label(text=_("Force Sync (bypass LWW):"), icon="FILE_REFRESH")
+            box5.label(text="Force Sync", icon="FILE_REFRESH")
             row = box5.row(align=True)
-            row.operator("blender_sync.force_push", text=_("Push"), icon="EXPORT")
-            row.operator("blender_sync.force_pull", text=_("Pull"), icon="IMPORT")
-            box5.label(text=_("Honors Sync Filters below."), icon="INFO")
+            row.operator("blender_sync.force_push", text="Push", icon="EXPORT")
+            row.operator("blender_sync.force_pull", text="Pull", icon="IMPORT")
 
         layout.separator()
         layout.operator("blender_sync.disconnect", icon="X")
@@ -79,7 +72,7 @@ class SYNC_PT_main(Panel):
 class SYNC_PT_filters(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "Sync"
+    bl_category = "Blender Sync"
     bl_label = "Sync Filters"
     bl_idname = "SYNC_PT_filters"
     bl_parent_id = "SYNC_PT_main"
@@ -120,7 +113,7 @@ class SYNC_PT_filters(Panel):
         col.prop(state, "sync_view3d")
 
         layout.separator()
-        layout.label(text=_("Mesh:"))
+        layout.label(text="Mesh:")
         col2 = layout.column(align=True)
         col2.prop(state, "mesh_on_edit_exit")
         col2.prop(state, "mesh_during_edit")
@@ -129,7 +122,7 @@ class SYNC_PT_filters(Panel):
         sub.prop(state, "mesh_edit_hz")
 
         layout.separator()
-        layout.label(text=_("Conflict Resolution:"))
+        layout.label(text="Conflict Resolution:")
         col3 = layout.column(align=True)
         col3.prop(state, "conflict_policy", text="")
         col3.prop(state, "conflict_window")

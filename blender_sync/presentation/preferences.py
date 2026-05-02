@@ -26,13 +26,13 @@ class SyncAddonPreferences(AddonPreferences):
     def draw(self, context):
         layout = self.layout
         col = layout.column()
-        col.label(text=_("ICE Servers"))
+        col.label(text="ICE Servers")
         col.prop(self, "stun_url")
         col.prop(self, "turn_url")
         col.prop(self, "turn_username")
         col.prop(self, "turn_password")
         col.separator()
-        col.label(text=_("Signaling"))
+        col.label(text="Signaling")
         col.prop(self, "relays")
 
 
