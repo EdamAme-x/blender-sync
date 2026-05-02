@@ -77,6 +77,41 @@ class BpyStateSync(ISessionEvents):
                 setattr(st, key, val)
             except Exception:
                 pass
+        # Force a redraw of every panel/view that displays our state.
+        # Without this, Blender only re-runs Panel.draw on user input
+        # or scene events, so a token / status update set from the
+        # async signaling thread would sit invisible in PropertyGroup
+        # storage until the user happened to click on the sidebar (or
+        # several minutes later when an unrelated event repainted the
+        # area). The user-visible symptom was "token only shows up
+        # 2 minutes after pressing Start Sharing".
+        try:
+            self._tag_redraw_sync_panels(bpy)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _tag_redraw_sync_panels(bpy) -> None:
+        """Walk every screen / area / region and tag the 3D View
+        sidebar (UI region) for redraw. That's where the Sync panel
+        lives, so a single tag per matching region is enough to
+        flush the new state immediately."""
+        wm = getattr(bpy.context, "window_manager", None)
+        if wm is None:
+            return
+        for window in getattr(wm, "windows", []) or []:
+            screen = getattr(window, "screen", None)
+            if screen is None:
+                continue
+            for area in getattr(screen, "areas", []) or []:
+                if getattr(area, "type", None) != "VIEW_3D":
+                    continue
+                for region in getattr(area, "regions", []) or []:
+                    if getattr(region, "type", None) == "UI":
+                        try:
+                            region.tag_redraw()
+                        except Exception:
+                            pass
 
 
 class BpyConfigReader:

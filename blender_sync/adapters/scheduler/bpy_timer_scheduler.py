@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from ...domain.ports import IScheduler
+
+_log = logging.getLogger("blender_sync.scheduler")
 
 
 class BpyTimerScheduler(IScheduler):
@@ -18,8 +21,13 @@ class BpyTimerScheduler(IScheduler):
         def wrapper() -> float | None:
             try:
                 callback()
-            except Exception:
-                pass
+            except Exception as exc:
+                # Pre-fix: this was a silent `pass`. A single bad tick
+                # could mask every subsequent UI update (token sync,
+                # status, metrics) and the user only sees a frozen
+                # panel. Surface the exception to the log so failures
+                # are diagnosable.
+                _log.exception("scheduled callback raised: %s", exc)
             return interval_seconds
 
         self._registered[callback] = wrapper
