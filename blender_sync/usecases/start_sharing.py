@@ -56,6 +56,22 @@ class StartSharingUseCase:
         full_offer = self._transport.local_description() or offer_sdp
 
         for provider in self._providers:
+            # Bail out immediately if the user (or disconnect path)
+            # already moved the session out of an active sharing
+            # state. Without this, after Disconnect cancels the
+            # current `wait_answer`, we'd fall through to the next
+            # provider (typically manual SDP) and produce a stray
+            # awaiting_manual_answer state the user never asked for.
+            if session.status not in (
+                SessionStatus.SHARING,
+                SessionStatus.AWAITING_ANSWER,
+                SessionStatus.AWAITING_MANUAL_ANSWER,
+            ):
+                self._logger.info(
+                    "start_sharing aborted by external state change "
+                    "(status=%s)", session.status.value,
+                )
+                return
             try:
                 preparation = await provider.prepare_offer(
                     room_id, full_offer, self._token_codec

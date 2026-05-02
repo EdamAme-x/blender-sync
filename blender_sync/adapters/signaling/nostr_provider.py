@@ -94,6 +94,12 @@ class NostrSignalingProvider(ISignalingProvider):
         self._logger = logger
         self._relays = relays
         self._connections: list[Any] = []
+        # Pending `_wait` calls subscribe to this list of futures so a
+        # `close()` (e.g. user pressed Disconnect) can wake them up
+        # instead of leaving them blocked on the full timeout. Without
+        # this the user-visible Disconnect button is a no-op while the
+        # 180s nostr wait is still ticking.
+        self._pending_waits: list[asyncio.Future[str]] = []
         self._secret_hex = _new_secret_hex()
         try:
             self._sign, self._xonly = _load_signer()
@@ -165,6 +171,8 @@ class NostrSignalingProvider(ISignalingProvider):
         ])
 
         done: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        # Register so close() can cancel us early.
+        self._pending_waits.append(done)
 
         async def watch(ws: Any) -> None:
             try:
@@ -202,9 +210,19 @@ class NostrSignalingProvider(ISignalingProvider):
             return await asyncio.wait_for(done, timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise SignalingError(f"nostr wait timeout (kind={kind})") from exc
+        except asyncio.CancelledError:
+            # close() cancelled the future. Surface as SignalingError
+            # so the caller (StartSharingUseCase / JoinSessionUseCase)
+            # treats it like a regular failure and the runtime stops
+            # waiting.
+            raise SignalingError(f"nostr wait cancelled (kind={kind})")
         finally:
             for t in watchers:
                 t.cancel()
+            try:
+                self._pending_waits.remove(done)
+            except ValueError:
+                pass
 
     async def prepare_offer(
         self, room_id: str, sdp: str, token_codec: ITokenCodec
@@ -228,6 +246,15 @@ class NostrSignalingProvider(ISignalingProvider):
         return await self._wait(room_id, NOSTR_KIND_ANSWER, timeout)
 
     async def close(self) -> None:
+        # Wake up every in-flight _wait() so the runtime doesn't sit
+        # idle until its 180s timeout fires. The wait_for layer
+        # propagates cancellation as CancelledError, which _wait
+        # converts into a SignalingError for the caller.
+        for fut in list(self._pending_waits):
+            if not fut.done():
+                fut.cancel()
+        self._pending_waits.clear()
+
         for ws in self._connections:
             try:
                 await ws.close()
