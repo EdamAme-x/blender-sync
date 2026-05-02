@@ -1,12 +1,18 @@
 """Build the Blender Sync extension zip.
 
 Steps:
-  1. Download required wheels for all 5 Blender platforms (cp311) into blender_sync/wheels/.
+  1. Download required wheels for every (platform × Python) combination
+     into blender_sync/wheels/. Default Python set is 3.11 (Blender 5.0)
+     plus 3.12 / 3.13 (Blender 5.1+) so a single zip installs cleanly on
+     any modern Blender — Blender picks the wheel that matches its own
+     bundled Python at install time.
   2. Patch blender_manifest.toml with the resolved wheel list.
   3. Zip blender_sync/ into dist/blender_sync-<version>.zip.
 
 Usage:
-    python scripts/build_extension.py [--skip-download] [--platforms windows-x64,linux-x64]
+    python scripts/build_extension.py [--skip-download]
+                                       [--platforms windows-x64,linux-x64]
+                                       [--python-versions 3.11,3.12,3.13]
 """
 from __future__ import annotations
 
@@ -53,33 +59,46 @@ REQUIREMENTS = [
     ("coincurve", ">=20,<22"),
 ]
 
-PYTHON_VERSION = "3.11"
+# Default Python versions to bundle. Blender picks at install time
+# whichever cp* wheel matches its embedded interpreter.
+#   - 3.11: Blender 5.0
+#   - 3.12: defensive future-proofing (no Blender release ships this
+#     today, but the wheels are tiny and harmless to include)
+#   - 3.13: Blender 5.1+
+DEFAULT_PYTHON_VERSIONS = ["3.11", "3.12", "3.13"]
 
 
-def download_wheels(platforms: list[str]) -> None:
+def download_wheels(platforms: list[str], python_versions: list[str]) -> None:
     WHEELS_DIR.mkdir(parents=True, exist_ok=True)
     for name, spec in REQUIREMENTS:
         package_arg = f"{name}{spec}" if spec else name
         for platform in platforms:
             tags = PIP_PLATFORM_TAGS[platform]
-            cmd = [
-                sys.executable, "-m", "pip", "download",
-                "--only-binary=:all:",
-                "--python-version", PYTHON_VERSION,
-                "--implementation", "cp",
-                "--abi", f"cp{PYTHON_VERSION.replace('.', '')}",
-                "-d", str(WHEELS_DIR),
-                package_arg,
-            ]
-            for tag in tags:
-                cmd.extend(["--platform", tag])
-            print(f"[download] {package_arg} ({platform})")
-            try:
-                subprocess.run(cmd, check=True, capture_output=True)
-            except subprocess.CalledProcessError as exc:
-                stderr = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else ""
-                print(f"  WARN: {name} for {platform} failed:\n{stderr.strip()[:400]}",
-                      file=sys.stderr)
+            for py_version in python_versions:
+                cmd = [
+                    sys.executable, "-m", "pip", "download",
+                    "--only-binary=:all:",
+                    "--python-version", py_version,
+                    "--implementation", "cp",
+                    "--abi", f"cp{py_version.replace('.', '')}",
+                    "-d", str(WHEELS_DIR),
+                    package_arg,
+                ]
+                for tag in tags:
+                    cmd.extend(["--platform", tag])
+                print(f"[download] {package_arg} ({platform}, py{py_version})")
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True)
+                except subprocess.CalledProcessError as exc:
+                    stderr = (
+                        exc.stderr.decode("utf-8", errors="ignore")
+                        if exc.stderr else ""
+                    )
+                    print(
+                        f"  WARN: {name} for {platform} py{py_version} "
+                        f"failed:\n{stderr.strip()[:400]}",
+                        file=sys.stderr,
+                    )
 
 
 def collect_wheel_paths() -> list[str]:
@@ -198,12 +217,25 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--skip-download", action="store_true")
     p.add_argument("--platforms", default=",".join(DEFAULT_PLATFORMS))
+    p.add_argument(
+        "--python-versions",
+        default=",".join(DEFAULT_PYTHON_VERSIONS),
+        help="Comma-separated CPython versions to bundle wheels for. "
+             "Blender picks the matching cp* wheel at install time.",
+    )
     p.add_argument("--no-zip", action="store_true")
     args = p.parse_args()
 
     platforms = [s.strip() for s in args.platforms.split(",") if s.strip()]
+    python_versions = [
+        s.strip() for s in args.python_versions.split(",") if s.strip()
+    ]
+    if not python_versions:
+        print("ERROR: --python-versions is empty", file=sys.stderr)
+        return 1
+
     if not args.skip_download:
-        download_wheels(platforms)
+        download_wheels(platforms, python_versions)
 
     wheels = collect_wheel_paths()
     if not wheels:
