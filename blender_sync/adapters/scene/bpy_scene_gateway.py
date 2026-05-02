@@ -139,6 +139,13 @@ class BpySceneGateway(ISceneGateway):
         # update in O(1) instead of scanning bpy.data each call.
         self._shape_key_to_owner: dict[str, str] = {}
         self._action_to_users: dict[str, set[tuple[str, str]]] = {}
+        # Owners that *had* animation_data the last time we observed
+        # them. Required for Undo: if a Ctrl+Z step set
+        # animation_data to None on an owner, the live walk in
+        # _mark_all_dirty would skip them and the clear op would
+        # never reach peers. By remembering the previous set, the
+        # undo path can mark them and the serializer emits a clear.
+        self._previously_animated: set[tuple[str, str]] = set()
         self._cleanup_counter = 0
         self._cleanup_interval = 600
         # Set when the user pressed Ctrl+Z / Ctrl+Shift+Z. SyncTick reads
@@ -558,11 +565,15 @@ class BpySceneGateway(ISceneGateway):
         t.mark_scene_world()
         t.mark_view3d()
         t.mark_vse_strip()
-        # Animation owners. The cached `_action_to_users` only records
-        # owners with an active Action — drivers-only / NLA-only owners
-        # never landed there. Walk the live datablocks here so a force
-        # rebroadcast carries every animation-bearing owner regardless
-        # of what's on `ad.action` right now.
+        # Animation owners. Two groups must be marked:
+        #   1) live owners with `animation_data` (covers drivers-only
+        #      and NLA-only owners that the cached _action_to_users
+        #      reverse lookup misses because it requires ad.action).
+        #   2) owners that *previously* had animation_data but no
+        #      longer do — without this set, an undo step that
+        #      cleared animation_data is invisible to the live walk
+        #      and peers retain the stale Action / drivers / NLA.
+        live_animated: set[tuple[str, str]] = set()
         for kind, attr in (
             ("object", "objects"),
             ("material", "materials"),
@@ -579,6 +590,13 @@ class BpySceneGateway(ISceneGateway):
                 if ad is None:
                     continue
                 t.mark_animation(f"{kind}:{db.name}")
+                live_animated.add((kind, db.name))
+        # Mark previously-animated owners that have since lost their
+        # animation_data — their clear op is what restores peer state.
+        for kind, name in self._previously_animated - live_animated:
+            t.mark_animation(f"{kind}:{name}")
+        # Refresh the previous-animated set for the next undo cycle.
+        self._previously_animated = live_animated
 
     def _make_depsgraph_handler(self):
         gateway = self

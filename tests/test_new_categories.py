@@ -1350,6 +1350,34 @@ def test_constraints_serialize_with_no_constraints_emits_op():
     assert out["constraints"] == []
 
 
+def test_animation_serialize_owner_explicit_clears_for_subareas():
+    """P2-23: when an owner has animation_data but a sub-area
+    (action / drivers / nla_tracks) was cleared, the wire op must
+    contain that sub-area as None / [] explicitly so apply removes
+    the stale state. Pre-fix the empty sub-area key was just
+    omitted, which apply treats as 'no change'."""
+    from blender_sync.adapters.scene.categories.animation import (
+        AnimationCategoryHandler,
+    )
+
+    class FakeAD:
+        action = None        # was cleared
+        drivers = ()         # was cleared
+        nla_tracks = ()      # was cleared
+
+    class FakeOwner:
+        name = "Cube"
+        animation_data = FakeAD()
+
+    h = AnimationCategoryHandler()
+    out = h._serialize_owner(FakeOwner(), owner_type="object")
+    assert out is not None
+    # Each sub-area is present with an explicit empty value.
+    assert out["action"] is None
+    assert out["drivers"] == []
+    assert out["nla_tracks"] == []
+
+
 def test_animation_serialize_owner_with_no_animation_data_emits_clear():
     """P2-22: owner whose animation_data was cleared entirely must
     emit a clear op so peers drop their stale Action/drivers/NLA."""
@@ -1391,6 +1419,92 @@ def test_animation_serialize_owner_with_empty_animation_data_emits_op():
     out = h._serialize_owner(FakeOwner(), owner_type="object")
     assert out is not None
     assert out["owner"] == "Cube"
+
+
+def test_shape_keys_clear_removes_basis_last(monkeypatch):
+    """P3-25: when applying a clear op, non-Basis blocks must be
+    removed before Basis. Blender refuses to remove Basis while
+    other blocks still reference it as their relative_key, so a
+    naive iteration order leaves Basis behind."""
+    import types
+    import sys
+
+    fake_bpy = types.ModuleType("bpy")
+
+    removal_order: list[str] = []
+
+    class FakeKB:
+        def __init__(self, name):
+            self.name = name
+
+    class FakeKeys:
+        def __init__(self):
+            self.basis = FakeKB("Basis")
+            self.smile = FakeKB("Smile")
+            self.frown = FakeKB("Frown")
+            self.key_blocks = [self.basis, self.smile, self.frown]
+            self.use_relative = True
+
+        @property
+        def reference_key(self):
+            return self.basis
+
+    class FakeMesh:
+        def __init__(self):
+            self.shape_keys = FakeKeys()
+
+    class FakeObj:
+        def __init__(self):
+            self.name = "Cube"
+            self.data = FakeMesh()
+
+        def shape_key_remove(self, kb):
+            # Mirror Blender: refuse to remove Basis while non-Basis
+            # blocks remain.
+            keys = self.data.shape_keys
+            if keys is None:
+                return
+            if (
+                kb is keys.reference_key
+                and any(k is not keys.reference_key for k in keys.key_blocks)
+            ):
+                raise RuntimeError("cannot remove Basis while others exist")
+            removal_order.append(kb.name)
+            keys.key_blocks = [k for k in keys.key_blocks if k is not kb]
+            if not keys.key_blocks:
+                self.data.shape_keys = None
+
+        def shape_key_add(self, name):
+            keys = self.data.shape_keys or FakeKeys()
+            self.data.shape_keys = keys
+            return keys.basis
+
+    fake_bpy.data = types.SimpleNamespace(objects={"Cube": FakeObj()})
+    fake_bpy.data.objects = {"Cube": FakeObj()}
+
+    class _Lookup:
+        def __init__(self, m): self._m = m
+        def get(self, name): return self._m.get(name)
+
+    fake_bpy.data = types.SimpleNamespace(
+        objects=_Lookup({"Cube": FakeObj()}),
+    )
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.categories.shape_keys import (
+            ShapeKeysCategoryHandler,
+        )
+        h = ShapeKeysCategoryHandler()
+        h.apply([{
+            "obj": "Cube",
+            "use_relative": True,
+            "blocks": [],   # clear
+        }])
+        # Basis must be removed last.
+        assert removal_order[-1] == "Basis"
+        assert set(removal_order) == {"Basis", "Smile", "Frown"}
+    finally:
+        sys.modules.pop("bpy", None)
 
 
 def test_shape_keys_empty_stack_clears_block_hash_cache():

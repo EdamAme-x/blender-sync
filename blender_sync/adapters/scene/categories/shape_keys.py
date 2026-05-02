@@ -144,15 +144,29 @@ class ShapeKeysCategoryHandler:
             self._forget_object_block_hashes(obj.name)
             keys = obj.data.shape_keys
             if keys is not None:
-                # Walk a copy because shape_key_remove mutates the
-                # collection. shape_key_remove handles Basis lastly;
-                # Blender forbids removing Basis while other blocks
-                # exist, so iterating twice handles that case too.
+                # Two-pass removal:
+                #   1. Remove every non-Basis block. Blender refuses
+                #      to remove Basis while other blocks reference
+                #      it, so this must come first.
+                #   2. Remove Basis (the last surviving block).
                 for kb in list(keys.key_blocks):
+                    if kb == keys.reference_key:
+                        # Basis = reference_key; defer.
+                        continue
                     try:
                         obj.shape_key_remove(kb)
                     except Exception:
                         pass
+                # Re-fetch — keys may now be None if Blender already
+                # collapsed an empty stack, or still present with just
+                # Basis remaining.
+                keys = obj.data.shape_keys
+                if keys is not None:
+                    for kb in list(keys.key_blocks):
+                        try:
+                            obj.shape_key_remove(kb)
+                        except Exception:
+                            pass
             return
 
         keys = obj.data.shape_keys

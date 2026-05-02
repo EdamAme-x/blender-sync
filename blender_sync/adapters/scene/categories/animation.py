@@ -159,22 +159,22 @@ class AnimationCategoryHandler:
             "owner": owner.name,
             "owner_type": owner_type,
         }
+        # Always emit each sub-area explicitly so the apply side can
+        # distinguish "no change" (key absent — never happens here
+        # anymore) from "remove all" (key present, value None / []).
+        # Without this, an undo step that cleared just one sub-area
+        # would leave peers with the stale Action / drivers / NLA.
         if ad.action is not None:
             out["action"] = _serialize_action(ad.action)
+        else:
+            out["action"] = None
 
         drivers = list(getattr(ad, "drivers", []) or [])
-        if drivers:
-            out["drivers"] = [_serialize_driver_fcurve(fc) for fc in drivers]
+        out["drivers"] = [_serialize_driver_fcurve(fc) for fc in drivers]
 
         tracks = list(getattr(ad, "nla_tracks", []) or [])
-        if tracks:
-            out["nla_tracks"] = [_serialize_nla_track(t) for t in tracks]
+        out["nla_tracks"] = [_serialize_nla_track(t) for t in tracks]
 
-        # Even when action / drivers / nla_tracks are all empty (e.g.
-        # the user just removed the last driver via undo), still emit
-        # the op so peers clear their stale state. The apply path
-        # treats missing keys as "no change in that sub-area" but
-        # honors empty arrays / None action explicitly.
         return out
 
     def apply(self, ops: list[dict[str, Any]]) -> None:
@@ -198,7 +198,17 @@ class AnimationCategoryHandler:
                     pass
                 continue
             if "action" in op:
-                self._apply_action(bpy, owner, op.get("action", {}))
+                action_data = op.get("action")
+                if action_data is None:
+                    # Explicit clear — sender's ad.action is None.
+                    ad = getattr(owner, "animation_data", None)
+                    if ad is not None:
+                        try:
+                            ad.action = None
+                        except Exception:
+                            pass
+                else:
+                    self._apply_action(bpy, owner, action_data)
             if "drivers" in op:
                 self._apply_drivers(bpy, owner, op.get("drivers") or [])
             if "nla_tracks" in op:

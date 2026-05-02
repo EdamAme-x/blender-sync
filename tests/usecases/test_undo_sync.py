@@ -594,6 +594,79 @@ def test_real_gateway_undo_handler_marks_driver_only_animation_owners():
         sys.modules.pop("bpy", None)
 
 
+def test_real_gateway_undo_handler_marks_previously_animated_owners_after_clear():
+    """P2-24: an owner that *had* animation_data on a previous undo
+    walk but whose animation_data was cleared by Ctrl+Z must still
+    be marked dirty, so the serializer's clear-op reaches peers and
+    they drop their stale Action / drivers / NLA."""
+    import types
+    import sys
+
+    fake_bpy = types.ModuleType("bpy")
+
+    # First walk: object has animation_data. Second walk: it's None.
+    class FakeAD:
+        action = None
+        drivers = ()
+        nla_tracks = ()
+
+    class TogglingObj:
+        def __init__(self, *, animated: bool):
+            self.name = "Cube"
+            self.type = "MESH"
+            self.modifiers = ()
+            self.particle_systems = ()
+            self.data = None
+            self.animation_data = FakeAD() if animated else None
+
+    state = {"obj": TogglingObj(animated=True)}
+
+    fake_bpy.data = types.SimpleNamespace(
+        objects=[state["obj"]],
+        materials=[], meshes=[], cameras=[], lights=[], collections=[],
+        images=[], armatures=[], node_groups=[], textures=[],
+        curves=[], lattices=[], metaballs=[], sounds=[],
+        worlds=[],
+        volumes=None, pointclouds=None,
+        grease_pencils=None, grease_pencils_v3=None,
+    )
+    fake_bpy.types = types.SimpleNamespace()
+    fake_bpy.app = types.SimpleNamespace(
+        background=False, handlers=types.SimpleNamespace(),
+    )
+    fake_bpy.context = types.SimpleNamespace(scene=None, screen=None)
+    fake_bpy.msgbus = types.SimpleNamespace()
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.bpy_scene_gateway import (
+            BpySceneGateway,
+        )
+        from blender_sync.domain.policies.dirty_tracker import DirtyTracker
+
+        gw = BpySceneGateway(logger=RecordingLogger(), tracker=DirtyTracker())
+
+        # First undo walk: animation_data is present.
+        gw._undo_handler(scene=None, depsgraph=None)
+        assert "object:Cube" in gw._tracker.animations
+        assert ("object", "Cube") in gw._previously_animated
+
+        # Reset tracker. User performs a Ctrl+Z that clears
+        # animation_data on the object.
+        gw._tracker.animations.clear()
+        state["obj"] = TogglingObj(animated=False)
+        fake_bpy.data.objects[:] = [state["obj"]]
+
+        # Second undo walk: animation_data is None now. The owner
+        # must still be marked because we remembered it from before.
+        gw._undo_handler(scene=None, depsgraph=None)
+        assert "object:Cube" in gw._tracker.animations
+        # And the previously-animated set drops it now (live walk
+        # didn't see it). Next undo cycle won't redundantly mark it.
+        assert ("object", "Cube") not in gw._previously_animated
+    finally:
+        sys.modules.pop("bpy", None)
+
+
 def test_real_gateway_undo_handler_skips_when_applying_remote():
     """Echo guard: undo_post must no-op if we're currently applying a
     remote packet (the rewind we'd see is the legitimate result of
