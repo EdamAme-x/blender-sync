@@ -50,9 +50,18 @@ class ShapeKeysCategoryHandler:
 
     def _serialize(self, obj) -> dict[str, Any] | None:
         data = obj.data
-        if data is None or not hasattr(data, "shape_keys") or data.shape_keys is None:
+        if data is None or not hasattr(data, "shape_keys"):
             return None
         keys = data.shape_keys
+        if keys is None:
+            # Object can hold shape keys but has none right now (e.g.
+            # the user just removed the last one). Emit an empty
+            # `blocks` op so peers clear their stale stack on apply.
+            return {
+                "obj": obj.name,
+                "use_relative": True,
+                "blocks": [],
+            }
         blocks: list[dict[str, Any]] = []
         for kb in keys.key_blocks:
             block_hash = self._hash_block(kb)

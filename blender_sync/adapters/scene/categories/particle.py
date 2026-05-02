@@ -165,7 +165,12 @@ class ParticleCategoryHandler:
         return ops
 
     def _serialize_object(self, obj) -> dict[str, Any] | None:
-        if not obj.particle_systems:
+        # Capability check: only objects that *can* hold particle
+        # systems are valid here. Returning an empty `systems` list is
+        # a meaningful op — apply interprets it as "remove all
+        # particle systems" — which is required for undo cases where
+        # the user just removed the last system on the object.
+        if not hasattr(obj, "particle_systems"):
             return None
         systems = []
         for psys in obj.particle_systems:

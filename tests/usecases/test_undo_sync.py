@@ -412,6 +412,99 @@ def test_real_gateway_undo_handler_marks_objects_with_empty_modifier_stack():
         sys.modules.pop("bpy", None)
 
 
+def test_real_gateway_undo_handler_marks_objects_with_empty_particle_systems():
+    """P2-18: an object whose particle systems were ALL removed by
+    Undo must still be in the particle dirty set so peers can clear
+    their stale particle stack."""
+    import types
+    import sys
+
+    fake_bpy = types.ModuleType("bpy")
+
+    class EmptyPSObj:
+        name = "JustClearedParticles"
+        type = "MESH"
+        modifiers = ()
+        particle_systems = ()  # falsy — empty list
+        data = None
+
+    fake_bpy.data = types.SimpleNamespace(
+        objects=[EmptyPSObj()],
+        materials=[], meshes=[], cameras=[], lights=[], collections=[],
+        images=[], armatures=[], node_groups=[], textures=[],
+        curves=[], lattices=[], metaballs=[], sounds=[],
+        volumes=None, pointclouds=None,
+        grease_pencils=None, grease_pencils_v3=None,
+    )
+    fake_bpy.types = types.SimpleNamespace()
+    fake_bpy.app = types.SimpleNamespace(
+        background=False, handlers=types.SimpleNamespace(),
+    )
+    fake_bpy.context = types.SimpleNamespace(scene=None, screen=None)
+    fake_bpy.msgbus = types.SimpleNamespace()
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.bpy_scene_gateway import (
+            BpySceneGateway,
+        )
+        from blender_sync.domain.policies.dirty_tracker import DirtyTracker
+
+        gw = BpySceneGateway(logger=RecordingLogger(), tracker=DirtyTracker())
+        gw._undo_handler(scene=None, depsgraph=None)
+
+        assert "JustClearedParticles" in gw._tracker.particles
+    finally:
+        sys.modules.pop("bpy", None)
+
+
+def test_real_gateway_undo_handler_marks_objects_with_empty_shape_keys():
+    """P2-18: an object whose shape keys were all removed by Undo
+    must still be in the shape_keys dirty set."""
+    import types
+    import sys
+
+    fake_bpy = types.ModuleType("bpy")
+
+    class FakeMesh:
+        # Mesh data with NO shape keys (data.shape_keys is None).
+        shape_keys = None
+
+    class EmptySKObj:
+        name = "JustClearedSK"
+        type = "MESH"
+        modifiers = ()
+        particle_systems = ()
+        data = FakeMesh()
+
+    fake_bpy.data = types.SimpleNamespace(
+        objects=[EmptySKObj()],
+        materials=[], meshes=[], cameras=[], lights=[], collections=[],
+        images=[], armatures=[], node_groups=[], textures=[],
+        curves=[], lattices=[], metaballs=[], sounds=[],
+        volumes=None, pointclouds=None,
+        grease_pencils=None, grease_pencils_v3=None,
+    )
+    fake_bpy.types = types.SimpleNamespace()
+    fake_bpy.app = types.SimpleNamespace(
+        background=False, handlers=types.SimpleNamespace(),
+    )
+    fake_bpy.context = types.SimpleNamespace(scene=None, screen=None)
+    fake_bpy.msgbus = types.SimpleNamespace()
+    sys.modules["bpy"] = fake_bpy
+    try:
+        from blender_sync.adapters.scene.bpy_scene_gateway import (
+            BpySceneGateway,
+        )
+        from blender_sync.domain.policies.dirty_tracker import DirtyTracker
+
+        gw = BpySceneGateway(logger=RecordingLogger(), tracker=DirtyTracker())
+        gw._undo_handler(scene=None, depsgraph=None)
+
+        assert "JustClearedSK" in gw._tracker.shape_keys
+    finally:
+        sys.modules.pop("bpy", None)
+
+
 def test_real_gateway_undo_handler_skips_when_applying_remote():
     """Echo guard: undo_post must no-op if we're currently applying a
     remote packet (the rewind we'd see is the legitimate result of

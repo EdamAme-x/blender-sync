@@ -486,10 +486,16 @@ class BpySceneGateway(ISceneGateway):
                 t.mark_modifier(o.name, "")
             if o.type == "ARMATURE":
                 t.mark_pose(o.name)
-            if hasattr(o, "particle_systems") and o.particle_systems:
+            # Mark capability-based: an object that *had* particle
+            # systems / shape keys before the undo step but no longer
+            # has any must still be broadcast so peers clear their
+            # stale stack. Truthiness checks would skip those exact
+            # cases. The serializer emits empty lists for empties
+            # which the apply path interprets as "remove all".
+            if hasattr(o, "particle_systems"):
                 t.mark_particle(o.name)
             data = getattr(o, "data", None)
-            if data is not None and getattr(data, "shape_keys", None):
+            if data is not None and hasattr(data, "shape_keys"):
                 t.mark_shape_keys(o.name)
             # Mesh committed is keyed by the OBJECT name (not the mesh
             # datablock name) because MeshCategoryHandler resolves via

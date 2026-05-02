@@ -1314,6 +1314,48 @@ def test_modifier_serialize_walks_nested_settings():
     assert "rna_type" not in deep
 
 
+def test_particle_serialize_object_with_no_systems_emits_empty_op():
+    """P2-18: an object that had particle systems removed must still
+    serialize so apply can clear peer state. Pre-fix, _serialize_object
+    returned None for empty particle_systems and the dirty tick
+    emitted nothing."""
+    from blender_sync.adapters.scene.categories.particle import (
+        ParticleCategoryHandler,
+    )
+
+    class EmptyObj:
+        name = "Cube"
+        particle_systems = ()  # falsy
+
+    h = ParticleCategoryHandler()
+    out = h._serialize_object(EmptyObj())
+    assert out is not None
+    assert out["obj"] == "Cube"
+    assert out["systems"] == []
+
+
+def test_shape_keys_serialize_with_no_keys_emits_empty_blocks():
+    """P2-18: an object whose shape_keys is None (e.g. all removed by
+    Undo) must serialize an empty blocks op so peers clear their
+    stack."""
+    from blender_sync.adapters.scene.categories.shape_keys import (
+        ShapeKeysCategoryHandler,
+    )
+
+    class FakeMeshData:
+        shape_keys = None
+
+    class FakeObj:
+        name = "Cube"
+        data = FakeMeshData()
+
+    h = ShapeKeysCategoryHandler()
+    out = h._serialize(FakeObj())
+    assert out is not None
+    assert out["obj"] == "Cube"
+    assert out["blocks"] == []
+
+
 def test_particle_settings_serializes_refs_and_deep():
     """ParticleSettings hides three classes of state we need to sync:
       1. Object / Collection datablock pointers (instance, collision).
