@@ -77,6 +77,7 @@ class JoinSessionUseCase:
             answer_token = self._token_codec.encode_manual(full_answer)
             session.token = answer_token
             session.status = SessionStatus.AWAITING_MANUAL_ANSWER
+            self._events.on_token(answer_token)
             self._events.on_status(session.status.value)
             self._logger.info(
                 "manual answer token ready (%d chars) — share with offerer",

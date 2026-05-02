@@ -23,9 +23,13 @@ class _NoopEvents:
     def __init__(self):
         self.statuses: list[str] = []
         self.errors: list[str] = []
+        self.tokens: list[str] = []
 
     def on_status(self, status):
         self.statuses.append(status)
+
+    def on_token(self, token):
+        self.tokens.append(token)
 
     def on_peer_joined(self, peer):
         pass
@@ -35,6 +39,9 @@ class _NoopEvents:
 
     def on_error(self, error):
         self.errors.append(error)
+
+    def on_disconnected(self):
+        pass
 
 
 class _FailingNostr:

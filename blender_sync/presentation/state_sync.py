@@ -37,6 +37,9 @@ class BpyStateSync(ISessionEvents):
     def on_status(self, status: str) -> None:
         self._queue(lambda: self._update(status=status))
 
+    def on_token(self, token: str) -> None:
+        self._queue(lambda: self._update(token=token))
+
     def on_peer_joined(self, peer) -> None:
         self._logger.info("peer joined: %s", peer.peer_id)
 

@@ -62,6 +62,7 @@ class StartSharingUseCase:
                 )
                 session.token = preparation.share_token
                 session.status = preparation.post_status
+                self._events.on_token(preparation.share_token)
                 self._events.on_status(session.status.value)
                 self._logger.info(
                     "offer ready via %s, status=%s, token len=%d",
