@@ -15,3 +15,4 @@ blender_sync/wheels/*.whl
 .DS_Store
 .vscode/
 .idea/
+.claude/
