@@ -38,6 +38,10 @@ class _FakeStateProperty:
         self.latency_ms = 0.0
         self.bandwidth_kbps = 0.0
         self.peer_count = 0
+        # WebRTC diagnostics (mirrors PropertyGroup definition).
+        self.pc_state = ""
+        self.reliable_open = False
+        self.fast_open = False
 
 
 def _install_fake_bpy(monkeypatch, state_property: _FakeStateProperty) -> None:
@@ -219,6 +223,44 @@ def test_start_sharing_routes_token_to_state_property(monkeypatch):
 # Regression: protocol contract — _NoopEvents-shaped impls must satisfy
 # ISessionEvents fully (i.e. include on_token + on_disconnected).
 # ----------------------------------------------------------------------
+
+def test_transport_state_routing_to_property_group(monkeypatch):
+    """The runtime maps transport state events onto PropertyGroup
+    fields so the panel can show DataChannel readiness."""
+    from blender_sync.presentation.state_sync import BpyStateSync
+
+    state = _FakeStateProperty()
+    _install_fake_bpy(monkeypatch, state)
+    sync = BpyStateSync(_sync_queue(), RecordingLogger())
+
+    sync.queue_status_update(reliable_open=True)
+    assert state.reliable_open is True
+
+    sync.queue_status_update(fast_open=True)
+    assert state.fast_open is True
+
+    sync.queue_status_update(pc_state="connected")
+    assert state.pc_state == "connected"
+
+
+def test_on_disconnected_resets_transport_state(monkeypatch):
+    """After disconnect, the diagnostic fields must clear so the next
+    session starts with a clean diagnostic surface."""
+    from blender_sync.presentation.state_sync import BpyStateSync
+
+    state = _FakeStateProperty()
+    state.reliable_open = True
+    state.fast_open = True
+    state.pc_state = "connected"
+    _install_fake_bpy(monkeypatch, state)
+    sync = BpyStateSync(_sync_queue(), RecordingLogger())
+
+    sync.on_disconnected()
+
+    assert state.reliable_open is False
+    assert state.fast_open is False
+    assert state.pc_state == ""
+
 
 def test_isessionevents_protocol_includes_on_token():
     """Lock the contract so future test fakes can't drift."""

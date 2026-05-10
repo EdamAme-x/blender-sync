@@ -76,6 +76,25 @@ class AiortcTransport(ITransport):
             self._logger.warning("unknown datachannel label: %s", label)
             return
         self._channels[kind] = channel
+        self._logger.info(
+            "datachannel attached: %s (initial state=%s)",
+            kind.value, getattr(channel, "readyState", "unknown"),
+        )
+
+        @channel.on("open")
+        def _on_open():
+            self._logger.info("datachannel %s OPEN", kind.value)
+            if self._state_cb:
+                # Re-emit so UI can reflect the open state. The event
+                # name is composed so the listener can tell channel
+                # transitions apart from PeerConnection transitions.
+                self._state_cb(f"datachannel:{kind.value}:open")
+
+        @channel.on("close")
+        def _on_close():
+            self._logger.warning("datachannel %s CLOSED", kind.value)
+            if self._state_cb:
+                self._state_cb(f"datachannel:{kind.value}:closed")
 
         @channel.on("message")
         def _on_message(message):
@@ -133,10 +152,20 @@ class AiortcTransport(ITransport):
     async def send(self, channel: ChannelKind, data: bytes) -> None:
         ch = self._channels.get(channel)
         if ch is None:
-            self._logger.warning("channel %s not open; drop %d bytes", channel, len(data))
+            # Promoted from warning so the user can spot it in System
+            # Console. Without this, send drops are easy to miss and
+            # the panel just looks frozen.
+            self._logger.warning(
+                "send DROP: channel %s not attached yet; %d bytes lost",
+                channel.value, len(data),
+            )
             return
-        if ch.readyState != "open":
-            self._logger.debug("channel %s not ready (%s); drop", channel, ch.readyState)
+        state = getattr(ch, "readyState", "?")
+        if state != "open":
+            self._logger.warning(
+                "send DROP: channel %s state=%s (not open); %d bytes lost",
+                channel.value, state, len(data),
+            )
             return
         ch.send(data)
 

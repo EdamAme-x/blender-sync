@@ -12,6 +12,15 @@ class SyncSessionState(PropertyGroup):
     error: StringProperty(name="Error", default="")
     peer_id: StringProperty(name="Peer ID", default="")
     manual_answer_input: StringProperty(name="Manual Answer", default="")
+    # Surface-level WebRTC state for diagnostics. The session.status
+    # reaches LIVE the moment SDP is exchanged, but data won't actually
+    # flow until ICE finds a working path AND the DataChannels reach
+    # `open`. Two-NAT users can sit on LIVE+closed for the whole
+    # session and wonder why Push does nothing — exposing this on the
+    # panel makes the failure mode visible.
+    pc_state: StringProperty(name="PC State", default="")
+    reliable_open: BoolProperty(name="Reliable Open", default=False)
+    fast_open: BoolProperty(name="Fast Open", default=False)
 
     sync_transform: BoolProperty(name="Transform", default=True)
     sync_material: BoolProperty(name="Material", default=True)

@@ -53,6 +53,7 @@ class BpyStateSync(ISessionEvents):
         self._queue(lambda: self._update(
             token="", error="", manual_answer_input="",
             latency_ms=0.0, bandwidth_kbps=0.0, peer_count=0,
+            pc_state="", reliable_open=False, fast_open=False,
         ))
 
     def queue_status_update(self, **kwargs) -> None:

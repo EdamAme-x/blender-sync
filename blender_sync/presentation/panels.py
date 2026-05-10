@@ -89,6 +89,31 @@ class SYNC_PT_main(Panel):
 
     def _draw_live_section(self, layout, state):
         layout.separator()
+        # Surface DataChannel readiness BEFORE metrics. session.status
+        # reaching LIVE only means SDP was exchanged — if NAT/ICE
+        # blocks the actual data path, both channels stay closed and
+        # nothing flows. Showing this lets the user immediately spot
+        # "I'm LIVE but channels are closed → need TURN" without
+        # digging into the System Console.
+        diag = layout.box()
+        if state.reliable_open and state.fast_open:
+            diag.label(text="DataChannels: open ✓", icon="CHECKMARK")
+        else:
+            diag.label(text="DataChannels: not ready", icon="ERROR")
+            sub = diag.column(align=True)
+            sub.label(
+                text="  reliable: %s" % ("open" if state.reliable_open else "closed"),
+            )
+            sub.label(
+                text="  fast: %s" % ("open" if state.fast_open else "closed"),
+            )
+            if state.pc_state:
+                sub.label(text="  pc state: %s" % state.pc_state)
+            sub.label(
+                text="If both stay closed: configure a TURN server in Preferences.",
+            )
+
+        layout.separator()
         metrics = layout.box()
         metrics.label(text="Connection Metrics", icon="INFO")
         mc = metrics.column(align=True)

@@ -165,6 +165,7 @@ class SyncRuntime:
         self._latest_latency_ms = 0.0
 
         self.transport.on_recv(self._on_recv_from_async)
+        self.transport.on_state_change(self._on_transport_state)
 
     def _make_peer_id(self) -> str:
         import uuid
@@ -173,6 +174,28 @@ class SyncRuntime:
     def _on_recv_from_async(self, channel: ChannelKind, data: bytes) -> None:
         self._bytes_in += len(data)
         self.inbound.put(data)
+
+    def _on_transport_state(self, event: str) -> None:
+        """Receives both PeerConnection states (e.g. "connected",
+        "failed", "disconnected") and per-channel events (e.g.
+        "datachannel:reliable:open"). Normalizes them onto the
+        UI PropertyGroup so the side panel can show what's actually
+        happening below the SDP layer."""
+        kwargs: dict = {}
+        if event.startswith("datachannel:"):
+            try:
+                _, kind, state = event.split(":", 2)
+            except ValueError:
+                return
+            is_open = state == "open"
+            if kind == "reliable":
+                kwargs["reliable_open"] = is_open
+            elif kind == "fast":
+                kwargs["fast_open"] = is_open
+        else:
+            kwargs["pc_state"] = event
+        if kwargs:
+            self.events.queue_status_update(**kwargs)
 
     def _on_latency_ms(self, ms: float) -> None:
         self._latest_latency_ms = ms
