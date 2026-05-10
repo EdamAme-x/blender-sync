@@ -67,7 +67,10 @@ class JoinSessionUseCase:
             self._events.on_error(session.error)
             raise TransportError(session.error) from exc
 
-        await self._transport.gather_complete(timeout=8.0)
+        # Same rationale as StartSharingUseCase: 3s is enough for any
+        # reachable STUN; longer just makes Join feel slow when the
+        # network is fine.
+        await self._transport.gather_complete(timeout=3.0)
         full_answer = self._transport.local_description() or answer_sdp
 
         if is_manual:

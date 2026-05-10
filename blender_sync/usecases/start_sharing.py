@@ -52,7 +52,13 @@ class StartSharingUseCase:
             self._events.on_error(session.error)
             raise TransportError(session.error) from exc
 
-        await self._transport.gather_complete(timeout=8.0)
+        # ICE gathering normally takes < 1s on a healthy network and
+        # typically completes in 100-300ms when only host candidates
+        # are needed. The 8s previously here was just a tax for users
+        # whose STUN server was unreachable. 3s is enough for any
+        # reachable STUN, and timing out doesn't break correctness —
+        # we still ship whatever local candidates aiortc gathered.
+        await self._transport.gather_complete(timeout=3.0)
         full_offer = self._transport.local_description() or offer_sdp
 
         for provider in self._providers:

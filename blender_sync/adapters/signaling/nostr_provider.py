@@ -100,6 +100,10 @@ class NostrSignalingProvider(ISignalingProvider):
         # this the user-visible Disconnect button is a no-op while the
         # 180s nostr wait is still ticking.
         self._pending_waits: list[asyncio.Future[str]] = []
+        # Background tasks (optimistic publishes) get tracked so close()
+        # can cancel them and so they don't trigger
+        # "Task was destroyed but it is pending" warnings.
+        self._bg_tasks: set[asyncio.Task] = set()
         self._secret_hex = _new_secret_hex()
         try:
             self._sign, self._xonly = _load_signer()
@@ -120,9 +124,14 @@ class NostrSignalingProvider(ISignalingProvider):
         if self._connections:
             return self._connections
 
+        # Tightened from 5s. Relays that aren't reachable used to add
+        # a fixed 5s tax to every Start Sharing because asyncio.gather
+        # waits for the slowest peer; users perceived this as "token
+        # creation is slow". 2s is enough for any healthy relay
+        # (typical handshake is < 500ms) and bounds the worst case.
         async def connect(url: str):
             try:
-                ws = await asyncio.wait_for(websockets.connect(url), timeout=5.0)
+                ws = await asyncio.wait_for(websockets.connect(url), timeout=2.0)
                 return ws
             except Exception as exc:
                 self._logger.warning("nostr relay %s connect failed: %s", url, exc)
@@ -152,8 +161,11 @@ class NostrSignalingProvider(ISignalingProvider):
     async def _safe_send(self, ws: Any, msg: str) -> bool:
         try:
             await ws.send(msg)
+            # The OK relay response is purely informational — we don't
+            # wait on it for correctness. Drop the post-send recv() to
+            # 0.5s so a sluggish relay doesn't hold up the publish.
             try:
-                resp = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                resp = await asyncio.wait_for(ws.recv(), timeout=0.5)
                 self._logger.debug("relay ack: %s", resp[:120])
             except asyncio.TimeoutError:
                 pass
@@ -227,11 +239,33 @@ class NostrSignalingProvider(ISignalingProvider):
     async def prepare_offer(
         self, room_id: str, sdp: str, token_codec: ITokenCodec
     ) -> OfferPreparation:
-        await self._publish(room_id, sdp, NOSTR_KIND_OFFER)
+        # The token only encodes (room_id, hmac) — it doesn't depend on
+        # publish having completed. By awaiting publish here, we used
+        # to gate the user-visible token on the slowest relay's
+        # connect+ack RTT, which felt like "token creation is slow"
+        # even when nothing was wrong.
+        #
+        # New behavior: do the publish optimistically in the
+        # background and return the token immediately. The wait_answer
+        # path further down will surface any publish failure as a
+        # signaling error if no peer ever joins.
+        task = asyncio.create_task(
+            self._publish_logged(room_id, sdp, NOSTR_KIND_OFFER)
+        )
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
         return OfferPreparation(
             share_token=token_codec.encode_short(room_id, ""),
             post_status=SessionStatus.AWAITING_ANSWER,
         )
+
+    async def _publish_logged(self, room_id: str, sdp: str, kind: int) -> None:
+        try:
+            await self._publish(room_id, sdp, kind)
+        except Exception as exc:
+            self._logger.warning(
+                "background nostr publish failed (kind=%d): %s", kind, exc,
+            )
 
     async def publish_offer(self, room_id: str, sdp: str) -> None:
         await self._publish(room_id, sdp, NOSTR_KIND_OFFER)
@@ -254,6 +288,13 @@ class NostrSignalingProvider(ISignalingProvider):
             if not fut.done():
                 fut.cancel()
         self._pending_waits.clear()
+
+        # Background optimistic-publish tasks. Cancel them so a
+        # disconnect doesn't leak coroutines.
+        for t in list(self._bg_tasks):
+            if not t.done():
+                t.cancel()
+        self._bg_tasks.clear()
 
         for ws in self._connections:
             try:
